@@ -1,0 +1,43 @@
+# 安装：pip install -r requirements.txt
+# 实测环境：Python 3.13.1 / Windows 11
+
+# ---- LangChain / Agent ----
+langchain==1.3.10
+langchain-core==1.4.8
+langchain-community==0.4.2
+langchain-openai==1.3.2
+langchain-text-splitters==1.1.2
+langchain-experimental==0.4.2
+langchain-chroma==1.1.0
+langchain-tavily==0.2.18
+langgraph==1.2.6
+langgraph-checkpoint-sqlite==3.1.0
+
+# ---- 向量库 / 嵌入 ----
+chromadb==1.5.9
+dashscope==1.26.0
+
+# ---- PDF 解析 ----
+pymupdf==1.28.2
+pymupdf4llm==1.28.2
+
+# ---- 检索算法（BM25 / 中文分词 / 相似度）----
+rank-bm25==0.2.2
+jieba==0.42.1
+scikit-learn==1.8.0
+numpy==2.4.3
+
+# ---- 前端 ----
+streamlit==1.59.2
+
+# ---- 服务（迁移 FastAPI 后才真正用到，现在装上不影响）----
+fastapi==0.138.1
+uvicorn==0.49.0
+
+# ---- 其他 ----
+python-dotenv==1.2.2
+pandas==3.0.2
+openai==2.43.0
+# sympy 只因为 rag.py 里有一句没被用到的 `from sympy import content`；
+# 删掉那一行就可以去掉这条依赖（省 60MB）
+sympy==1.14.0

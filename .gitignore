@@ -1,0 +1,43 @@
+# ==================== 密钥 ====================
+# 绝对不能进仓库。提交前用 `git status` 确认没出现 .env
+.env
+*.env
+!.env.example
+
+# ==================== 本地数据（体积大 / 每次入库都会变）====================
+# 这些都在首次上传文档后自动重建，不需要提交
+chroma/
+chroma_structured.json
+chroma_summary.json
+embedding.json
+bm25.pkl
+md5.txt
+sqlite.db*
+translate.json
+translate_cache.json
+
+# ==================== 论文原件 ====================
+# 演示用的样例论文请放 demo/ 目录，下面一行会放行它
+*.pdf
+!demo/*.pdf
+
+# ==================== Python ====================
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+*.egg-info/
+build/
+dist/
+
+# ==================== 编辑器 / 系统 ====================
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ==================== 日志 ====================
+*.log
