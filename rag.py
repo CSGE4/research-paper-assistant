@@ -26,7 +26,12 @@ class Rag:
 
         self.prompt=ChatPromptTemplate.from_messages(
             [
-                ("system","以我提供的已知参考资料为主,简洁和专业的回答用户问题。参考资料:{context}。在回答结尾，请详细的显示文档的来源，来自哪一篇文件，第几页。如有可能，也可以显示在第几段。如果参考资料内容与问题无关，请输出空。"),
+                ("system","只允许复述参考资料里明确写出的陈述。参考资料:{context}。"
+           "回答结尾必须标注依据所在页码，页码只能来自上面每段开头的 [第N页]，"
+           "不许自己推算。禁止从文件名、arXiv 编号、DOI、日期后缀推断任何信息"
+           "（例如『1706』不代表 2017 年）。"
+           "参考文献条目里的年份、作者、期刊属于被引文献，不能当成本文的信息。"
+           "参考资料无法回答时，只输出「参考资料未提及」这四个字，不要补充常识。"),
                 ("user", "请回答用户提问：{input}")
             ]
         )
@@ -51,7 +56,7 @@ class Rag:
     def get_answer(self,query:str):
         retriever=self.vector_story
         result=retriever.result_search(query)
-        context = "\n\n".join(i["text"] for i in result)
+        context = "\n\n".join("[第%s页] %s" % (i["metadata"]["page_number"], i["text"]) for i in result)
         answer = self.chain.invoke({"input": query, "context": context})
         sources=self.collection_source(result)
         return {"answer": answer, "sources": sources}
