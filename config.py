@@ -5,6 +5,8 @@ file_path_summary=r"./chroma_summary.json"
 # 结构化提取结果（标题/作者/摘要/标题层级/表/图/公式/参考文献/附录），入库时写入
 file_path_structured=r"./chroma_structured.json"
 sqlite_path="./sqlite.db"
+CACHE_PATH = r"./translate_cache.json"    # 缓存：翻译过的段落不必再花钱
+RESULT_PATH = r"./translate.json"
 
 collections_name="knolege"
 persist_directory="./chroma"
