@@ -38,6 +38,3 @@ uvicorn==0.49.0
 python-dotenv==1.2.2
 pandas==3.0.2
 openai==2.43.0
-# sympy 只因为 rag.py 里有一句没被用到的 `from sympy import content`；
-# 删掉那一行就可以去掉这条依赖（省 60MB）
-sympy==1.14.0

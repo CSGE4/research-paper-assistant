@@ -1,6 +1,5 @@
 from langchain_core.runnables import RunnablePassthrough,RunnableWithMessageHistory
 from langchain_core.output_parsers import StrOutputParser
-from sympy import content
 
 from vctor import vctor_story_search
 from langchain_openai import ChatOpenAI
