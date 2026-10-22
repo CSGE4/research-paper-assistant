@@ -5,8 +5,17 @@ Streamlit采用重渲染机制，点击确认按钮后页面刷新，脚本会�
 缺陷影响：会重复执行PDF解析、向量生成，增加接口耗时与token消耗。
 未来优化方案：利用session_state增加文件处理标记，区分已处理任务，跳过重复后端计算。
 """
-
+# Streamlit Cloud 的 Secrets 不会自动变成环境变量，
+# 而这个项目里所有模块读的都是 os.getenv，所以第一件事是把 Secrets 灌进 os.environ。
+# 必须放在下面这些 import 之前：vctor 在 import 的那一刻就会 new 一个 Knolege()。
 import streamlit as st
+import os
+try:
+    for k in st.secrets:
+        os.environ[k] = str(st.secrets[k])
+except Exception:
+    # 本地跑的时候没有 secrets.toml，这里会抛异常，忽略即可 —— 本地读的是 .env
+    pass
 from knolege import *
 import json
 import re
