@@ -26,7 +26,20 @@ from functools import lru_cache
 from paper_extractor import DocumentParser, load_structured
 from vctor import vctor_story_search
 
+def clean_cell(value):
+    """把 pymupdf4llm 残留的 markdown 标记去掉。
 
+    它把数学式转成 markdown 时会写成 _O_(_n_<sup>2</sup>_·_d_) 这样，
+    每个字符裹一层斜体标记、上标写成 <sup>。st.dataframe 不认这些，
+    直接显示就是一堆下划线和尖括号。
+    """
+    s = str(value)
+    s = s.replace("**", "")            # 粗体
+    s = s.replace("_", "")             # 斜体标记
+    s = re.sub(r"<sup>(.*?)</sup>", r"^(\1)", s)   # 上标 -> ^(2)
+    s = re.sub(r"<sub>(.*?)</sub>", r"_(\1)", s)
+    s = s.replace("</s>", "/s")        # 被上标截断的 /s 尾巴
+    return s
 def parse_agent_json(ai_msg_content: str):
     """
     从带```json标记的字符串提取json，增加异常捕获
@@ -107,9 +120,20 @@ def render_doc(name: str):
             cap = tb.get("caption") or "（无题注）"
             if tb.get("rows"):
                 st.markdown(f"**{cap}**　{tb['n_rows']}行×{tb['n_cols']}列")
+                # 表头和每个格子都先洗一遍，不然 _O_(_n_<sup>2</sup>_·_d_) 这种标记会原样显示
+                header = []
+                for h in tb["header"] or []:
+                    header.append(clean_cell(h))
+                body = []
+                for row in tb["rows"][1:]:
+                    new_row = []
+                    for cell in row:
+                        new_row.append(clean_cell(cell))
+                    body.append(new_row)
                 st.dataframe(
-                    pd.DataFrame(tb["rows"][1:], columns=tb["header"] or None),
+                    pd.DataFrame(body, columns=header or None),
                     use_container_width=True,
+                    hide_index=True,
                 )
             else:
                 st.markdown(f"- {cap}（仅识别到题注，未取到表格数据）")
