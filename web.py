@@ -120,21 +120,43 @@ def render_doc(name: str):
             cap = tb.get("caption") or "（无题注）"
             if tb.get("rows"):
                 st.markdown(f"**{cap}**　{tb['n_rows']}行×{tb['n_cols']}列")
-                # 表头和每个格子都先洗一遍，不然 _O_(_n_<sup>2</sup>_·_d_) 这种标记会原样显示
+                # 表头和每个格子都先洗一遍，不然 _O_(_n_<sup>2</sup>_·_d_) 这种标记会原样显示。
+                # 表头还可能有重名：论文里左右并排的两段表很常见（比如两组 Model/Race/Gender/Age），
+                # pyarrow 把 DataFrame 转成 Arrow 时不允许重名列，会直接抛 ValueError，
+                # 所以重名的后面补 _2、_3 区分，只影响显示。
                 header = []
-                for h in tb["header"] or []:
-                    header.append(clean_cell(h))
+                seen = {}
+                for i, h in enumerate(tb["header"] or []):
+                    name = clean_cell(h).strip()
+                    if not name:
+                        name = "列%d" % (i + 1)
+                    if name in seen:
+                        seen[name] = seen[name] + 1
+                        name = "%s_%d" % (name, seen[name])
+                    else:
+                        seen[name] = 1
+                    header.append(name)
+
+                ncol = len(header)
                 body = []
                 for row in tb["rows"][1:]:
                     new_row = []
                     for cell in row:
                         new_row.append(clean_cell(cell))
+                    # 格子数和表头对不上时补齐或截断，否则 pandas 也会报错
+                    while len(new_row) < ncol:
+                        new_row.append("")
+                    if len(new_row) > ncol:
+                        new_row = new_row[:ncol]
                     body.append(new_row)
-                st.dataframe(
-                    pd.DataFrame(body, columns=header or None),
-                    use_container_width=True,
-                    hide_index=True,
-                )
+
+                if body and ncol > 0:
+                    frame = pd.DataFrame(body, columns=header)
+                elif body:
+                    frame = pd.DataFrame(body)
+                else:
+                    frame = pd.DataFrame(columns=header)
+                st.dataframe(frame, use_container_width=True, hide_index=True)
             else:
                 st.markdown(f"- {cap}（仅识别到题注，未取到表格数据）")
 
