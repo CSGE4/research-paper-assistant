@@ -59,6 +59,11 @@ _APPENDIX_MARK = re.compile(
     r"^\s*(附\s*录\s*([A-Za-z0-9一二三四五六七八九十]+)|Appendix\s*([A-Za-z0-9]+))"
     r"\s*[:：、.]?\s*(.*)$", re.I)
 
+# 字母编号的附录：有些论文不写 "Appendix" 这个词，直接写 "A. Linear-probe evaluation"。
+# 这条规则不能单独用 —— 正文里也会出现 "A. xxx" 这种行，必须限定在参考文献之后才算附录，
+# 位置约束在 _classify_blocks 末尾单独处理。
+_APPENDIX_LETTER = re.compile(r"^[A-Z]\.\s*\S")
+
 # 作者行：至少带一个分隔符，避免把标题行当作者
 _AUTHOR_LABEL = re.compile(r"^\s*(作\s*者|Authors?|By)\s*[:：]\s*(.+)$", re.I)
 _AUTHOR_SPLIT = re.compile(r"[,，;；、]|\s+and\s+|\s*&\s*")
@@ -447,6 +452,23 @@ class DocumentParser:
                          kind=kind)
                 continue
 
+        # 补一遍字母编号的附录（"A. Linear-probe evaluation"）。
+        # 必须限定在 references 之后：正文里也会出现 "A. xxx" 这种行，
+        # 不加位置约束就会把正文章节误判成附录。
+        passed_refs = False
+        for b in blocks:
+            if b["type"] != "heading":
+                continue
+            if b.get("kind") == "refs":
+                passed_refs = True
+                continue
+            if not passed_refs:
+                continue
+            if b.get("kind") != "heading":
+                continue
+            if _APPENDIX_LETTER.match(b.get("title") or ""):
+                b["kind"] = "appendix"
+
     # ---- 分节 ----
     @staticmethod
     def _norm_level(md_level, num, title):
@@ -819,6 +841,10 @@ class DocumentParser:
             title = sec["title"]
             raw = "\n".join(_strip_md(ln) for ln, _, _ in sec["lines"])
             items = self._split_numbered(raw)
+            if not items:
+                # 没有 [1]/1. 编号的（CLIP、APA 这类作者-年份格式），
+                # 既然已经定位到 references 小节了，小节里每个 "- " 项就是一条
+                items = self._split_bullet(raw)
         if not items:
             # 没有参考文献小节时，在全文里找 [1] [2] ... 条目。
             # 注意要支持列表符号，否则 pymupdf4llm 的 "- [1] xxx" 一条都匹配不上。
@@ -854,6 +880,30 @@ class DocumentParser:
                 buf = [body]
             elif _REF_ENTRY.match(body) or buf:
                 buf.append(body)
+        if buf:
+            items.append("\n".join(buf).strip())
+        return [it for it in items if it]
+
+    @staticmethod
+    def _split_bullet(raw):
+        """按行首的 markdown 列表符号切参考文献条目。
+
+        _split_numbered 只认 "[1]" / "1." 这种编号。
+        CLIP、APA 这类是「作者, 年份. 标题」开头，一条编号都没有，
+        但在 references 小节里每条都是一个 "- " 列表项，按列表符号切就够了。
+        """
+        items, buf = [], []
+        for ln in _lines(raw):
+            t = ln.strip()
+            if not t:
+                continue
+            if _LIST_MARK.match(t):
+                if buf:
+                    items.append("\n".join(buf).strip())
+                buf = [_LIST_MARK.sub("", t)]
+            elif buf:
+                # 续行：上一条被 PDF 折断了，接到当前条目后面
+                buf.append(t)
         if buf:
             items.append("\n".join(buf).strip())
         return [it for it in items if it]
