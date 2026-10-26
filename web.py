@@ -5,8 +5,17 @@ Streamlit采用重渲染机制，点击确认按钮后页面刷新，脚本会�
 缺陷影响：会重复执行PDF解析、向量生成，增加接口耗时与token消耗。
 未来优化方案：利用session_state增加文件处理标记，区分已处理任务，跳过重复后端计算。
 """
-
+# Streamlit Cloud 的 Secrets 不会自动变成环境变量，
+# 而这个项目里所有模块读的都是 os.getenv，所以第一件事是把 Secrets 灌进 os.environ。
+# 必须放在下面这些 import 之前：vctor 在 import 的那一刻就会 new 一个 Knolege()。
 import streamlit as st
+import os
+try:
+    for k in st.secrets:
+        os.environ[k] = str(st.secrets[k])
+except Exception:
+    # 本地跑的时候没有 secrets.toml，这里会抛异常，忽略即可 —— 本地读的是 .env
+    pass
 from knolege import *
 import json
 import re
@@ -17,7 +26,20 @@ from functools import lru_cache
 from paper_extractor import DocumentParser, load_structured
 from vctor import vctor_story_search
 
+def clean_cell(value):
+    """把 pymupdf4llm 残留的 markdown 标记去掉。
 
+    它把数学式转成 markdown 时会写成 _O_(_n_<sup>2</sup>_·_d_) 这样，
+    每个字符裹一层斜体标记、上标写成 <sup>。st.dataframe 不认这些，
+    直接显示就是一堆下划线和尖括号。
+    """
+    s = str(value)
+    s = s.replace("**", "")            # 粗体
+    s = s.replace("_", "")             # 斜体标记
+    s = re.sub(r"<sup>(.*?)</sup>", r"^(\1)", s)   # 上标 -> ^(2)
+    s = re.sub(r"<sub>(.*?)</sub>", r"_(\1)", s)
+    s = s.replace("</s>", "/s")        # 被上标截断的 /s 尾巴
+    return s
 def parse_agent_json(ai_msg_content: str):
     """
     从带```json标记的字符串提取json，增加异常捕获
@@ -98,10 +120,43 @@ def render_doc(name: str):
             cap = tb.get("caption") or "（无题注）"
             if tb.get("rows"):
                 st.markdown(f"**{cap}**　{tb['n_rows']}行×{tb['n_cols']}列")
-                st.dataframe(
-                    pd.DataFrame(tb["rows"][1:], columns=tb["header"] or None),
-                    use_container_width=True,
-                )
+                # 表头和每个格子都先洗一遍，不然 _O_(_n_<sup>2</sup>_·_d_) 这种标记会原样显示。
+                # 表头还可能有重名：论文里左右并排的两段表很常见（比如两组 Model/Race/Gender/Age），
+                # pyarrow 把 DataFrame 转成 Arrow 时不允许重名列，会直接抛 ValueError，
+                # 所以重名的后面补 _2、_3 区分，只影响显示。
+                header = []
+                seen = {}
+                for i, h in enumerate(tb["header"] or []):
+                    name = clean_cell(h).strip()
+                    if not name:
+                        name = "列%d" % (i + 1)
+                    if name in seen:
+                        seen[name] = seen[name] + 1
+                        name = "%s_%d" % (name, seen[name])
+                    else:
+                        seen[name] = 1
+                    header.append(name)
+
+                ncol = len(header)
+                body = []
+                for row in tb["rows"][1:]:
+                    new_row = []
+                    for cell in row:
+                        new_row.append(clean_cell(cell))
+                    # 格子数和表头对不上时补齐或截断，否则 pandas 也会报错
+                    while len(new_row) < ncol:
+                        new_row.append("")
+                    if len(new_row) > ncol:
+                        new_row = new_row[:ncol]
+                    body.append(new_row)
+
+                if body and ncol > 0:
+                    frame = pd.DataFrame(body, columns=header)
+                elif body:
+                    frame = pd.DataFrame(body)
+                else:
+                    frame = pd.DataFrame(columns=header)
+                st.dataframe(frame, use_container_width=True, hide_index=True)
             else:
                 st.markdown(f"- {cap}（仅识别到题注，未取到表格数据）")
 
