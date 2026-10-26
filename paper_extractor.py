@@ -59,6 +59,17 @@ _APPENDIX_MARK = re.compile(
     r"^\s*(附\s*录\s*([A-Za-z0-9一二三四五六七八九十]+)|Appendix\s*([A-Za-z0-9]+))"
     r"\s*[:：、.]?\s*(.*)$", re.I)
 
+# 字母编号的附录：有些论文不写 "Appendix" 这个词，直接写 "A. Linear-probe evaluation"。
+# 这条规则不能单独用 —— 正文里也会出现 "A. xxx" 这种行，必须限定位置才算附录
+# （参考文献之后，或者扫到 "Appendices / 附录" 大标题之后），
+# 位置约束在 _classify_blocks 末尾单独处理。
+_APPENDIX_LETTER = re.compile(r"^[A-Z](?:\.|\s+)\s*[A-Z0-9]")
+
+# 只用来"开闸"的附录大标题：Appendices / Appendix / 附录，后面不带字母。
+# 有的论文（Scaling Laws）把附录排在参考文献前面，光靠"参考文献之后"这个位置条件抓不到，
+# 所以扫到这种大标题时也要放开判定。
+_APPENDIX_GATE = re.compile(r"^\s*(Appendi(?:x|ces)|附\s*录)\s*[:：]?\s*$", re.I)
+
 # 作者行：至少带一个分隔符，避免把标题行当作者
 _AUTHOR_LABEL = re.compile(r"^\s*(作\s*者|Authors?|By)\s*[:：]\s*(.+)$", re.I)
 _AUTHOR_SPLIT = re.compile(r"[,，;；、]|\s+and\s+|\s*&\s*")
@@ -68,11 +79,15 @@ _AUTHOR_BLOCKED = re.compile(
 _CN_NAME = re.compile(r"^[\u4e00-\u9fa5]{2,4}$")
 # 英文人名要用 Unicode 感知的写法：Łukasz / Çağlar / Gülçehre 这类名字
 # 用 [A-Z] 开头会把它们全部漏掉。
+# \u00B4 是 PDF 把 "ń/ź" 抽成 "´" 的情况（Koco´n / Wo´zniak），不加就整块被当成人名以外的东西。
 _EN_NAME = re.compile(
-    r"^[^\W\d_][\w.\-']*(?:\s+[^\W\d_][\w.\-']*){1,3}$", re.UNICODE)
+    r"^[^\W\d_][\w.\-'\u00B4]*(?:\s+[^\W\d_][\w.\-'\u00B4]*){1,3}$", re.UNICODE)
 # 姓可以带小写词缀：van Merrienboer / de la Cruz
 _EN_NAME_LOOSE = re.compile(
-    r"^[^\W\d_][\w.\-']*(?:\s+[^\W\d_][\w.\-']*)+$", re.UNICODE)
+    r"^[^\W\d_][\w.\-'\u00B4]*(?:\s+[^\W\d_][\w.\-'\u00B4]*)+$", re.UNICODE)
+# 纯数字/符号片段：上标编号 "1,2" 会被 PDF 写成加粗，它不是人名也不是机构名，
+# 遇到它不能当成"作者块结束"。
+_ONLY_DIGITS = re.compile(r"^[\d\s,.;:%\-–—*_∗†‡§¶]+$")
 
 # 图/表标题（中英）
 _CAPTION_TABLE = re.compile(
@@ -164,6 +179,18 @@ def _strip_hashes(s):
     return re.sub(r"^#{1,6}\s*", "", _strip_md(s)).strip()
 
 
+def _strip_sup(s):
+    """去掉 <sup>…</sup> / <sub>…</sub>，只给"作者名"这一路用。
+
+    作者行里的上标是单位编号和脚注符号（Tri Dao<sup>†</sup>），不清掉的话
+    "Tri Dao<sup>†</sup>" 既不像人名，又会把整行撑过长度上限。
+    注意别改 _strip_md：公式和表格还要靠这些标签还原上下标。
+    """
+    s = re.sub(r"<sup>.*?</sup>", "", s or "", flags=re.I | re.S)
+    s = re.sub(r"<sub>.*?</sub>", "", s, flags=re.I | re.S)
+    return s
+
+
 # 一级标题里属于论文固定结构的名字（这些不该被当成文章标题）
 _STANDARD_SECTION = re.compile(
     r"^\s*(?:\d{1,2}(?:\.\d{1,2})*\.?\s*)?"
@@ -185,6 +212,38 @@ def _norm_number(num, text):
         return [{"一": 1, "二": 2, "三": 3, "四": 4, "五": 5,
                  "六": 6, "七": 7, "八": 8, "九": 9, "十": 10}.get(m.group(1), 1)]
     return []
+
+
+def _split_name_run(text):
+    """把挤在同一个加粗块里的多个名字拆开。
+
+    有的 PDF 只把前两个作者单独加粗，剩下的并成一块：
+        **Phillip Wallis Zeyuan Allen-Zhu Yuanzhi Li Shean Wang Lu Wang Weizhu Chen**
+    一个名字一般两三个词，所以每次取两个词；如果取到的以 "." 结尾（中间名缩写
+    如 "Tom B."），再并上后面的词当完整的姓。
+
+    拆完逐个用 _EN_NAME 验一遍，只要有一个不像人名，就整块返回空、让调用方放弃，
+    宁可少几个作者也不硬猜（免得把机构名、致谢里的话拼进作者列表）。
+    """
+    words = (text or "").split()
+    if len(words) < 4:
+        return []
+    groups = []
+    i = 0
+    while i < len(words):
+        if i + 1 < len(words):
+            pair = words[i] + " " + words[i + 1]
+        else:
+            pair = words[i]
+        i = i + 2
+        if pair.endswith(".") and i < len(words):
+            pair = pair + " " + words[i]
+            i = i + 1
+        groups.append(pair)
+    for g in groups:
+        if not _EN_NAME.match(g):
+            return []
+    return groups
 
 
 def _is_headish(text, allow_short=False):
@@ -447,6 +506,31 @@ class DocumentParser:
                          kind=kind)
                 continue
 
+        # 补一遍字母编号的附录（"A. Linear-probe evaluation"）。
+        # 必须限定位置：正文里也会出现 "A. xxx" 这种行，
+        # 不加位置约束就会把正文章节误判成附录。
+        # 两种放行条件：扫到了参考文献，或者扫到了 "Appendices" 这种附录大标题
+        # （Scaling Laws 的附录排在参考文献前面，只有前者抓不到）。
+        passed_refs = False
+        passed_gate = False
+        for b in blocks:
+            if b["type"] != "heading":
+                continue
+            if b.get("kind") == "refs":
+                passed_refs = True
+                continue
+            title = b.get("title") or ""
+            if _APPENDIX_GATE.match(title):
+                # 这行只是"Appendices / 附录"大标题，本身不算一条附录
+                passed_gate = True
+                continue
+            if not (passed_refs or passed_gate):
+                continue
+            if b.get("kind") != "heading":
+                continue
+            if _APPENDIX_LETTER.match(title):
+                b["kind"] = "appendix"
+
     # ---- 分节 ----
     @staticmethod
     def _norm_level(md_level, num, title):
@@ -569,10 +653,12 @@ class DocumentParser:
         page1 = pages.get(min(pages)) if pages else None
         first_page = _lines(page1 if page1 is not None else text)
 
-        # 1) 优先第一页的一级标题（论文大标题常被 pymupdf4llm 输出成 "# 标题"）
+        # 1) 优先第一页的大标题（论文大标题常被 pymupdf4llm 输出成 "# 标题"）
+        #    一级二级都算：有的论文（Scaling Laws）大标题是 "## 标题"，
+        #    只认 "#" 的话会滑到下一行的加粗作者上。
         for ln in first_page:
             m = _MD_HEADING.match(_strip_md(ln))
-            if not m or len(m.group(1)) != 1:
+            if not m or len(m.group(1)) > 2:
                 continue
             t = _strip_hashes(m.group(2))
             if not t or _STANDARD_SECTION.match(t):
@@ -663,7 +749,9 @@ class DocumentParser:
         for ln in lines[start:start + 6]:
             if _has_html_comment(ln):
                 continue
-            t = _strip_md(ln)
+            # 先把上标（单位编号/脚注符号）清掉再判断：不清的话
+            # "Tri Dao<sup>†</sup> , Daniel Y. Fu..." 会既不像人名又超长被跳过。
+            t = _strip_sup(_strip_md(ln))
             if not t or _has_html_comment(t):
                 continue
             if _ABSTRACT_MARK.match(t) or _KEYWORDS_MARK.match(t):
@@ -707,6 +795,9 @@ class DocumentParser:
 
         形如 **Ashish Vaswani**<sup>_∗_</sup> **Noam Shazeer**<sup>_∗_</sup> Google Brain ...
         做法：按顺序看加粗片段，遇到机构等非人名就停止（作者通常在最前面连续出现）。
+        两种情况要特殊处理，否则只拿到前一两个作者：
+          1) 上标编号本身也是加粗的（<sup>**1,2**</sup>），它不是人也不是机构，跳过别停；
+          2) 多个名字被并进同一个加粗块，交给 _split_name_run 拆，拆不干净就整块不要。
         """
         raw = line or ""
         names = []
@@ -717,8 +808,15 @@ class DocumentParser:
             if _EN_NAME.match(t) or _CN_NAME.match(t):
                 names.append(t)
                 continue
+            if _ONLY_DIGITS.match(t):
+                continue                           # 上标编号 "1,2"，跳过，不算作者块结束
+            if len(t.split()) >= 4:
+                parts = _split_name_run(t)         # 一块里挤了好几个名字
+                if parts:
+                    names.extend(parts)
+                    continue
             if names:
-                break                              # 已经收到人名，遇到非人名就结束
+                break                              # 已经收到人名，遇到机构等非人名就结束
         return names
 
     @staticmethod
@@ -736,7 +834,8 @@ class DocumentParser:
 
     @staticmethod
     def _split_authors(line):
-        raw = _strip_md(line)
+        # 上标（单位编号/†‡ 脚注）先清掉，否则名字后面挂一堆标签，个个都不像人名
+        raw = _strip_sup(_strip_md(line))
         if not raw or len(raw) > 160:
             return []
         parts = [p.strip(" *†‡§¶0123456789") for p in _AUTHOR_SPLIT.split(raw) if p.strip()]
@@ -819,6 +918,10 @@ class DocumentParser:
             title = sec["title"]
             raw = "\n".join(_strip_md(ln) for ln, _, _ in sec["lines"])
             items = self._split_numbered(raw)
+            if not items:
+                # 没有 [1]/1. 编号的（CLIP、APA 这类作者-年份格式），
+                # 既然已经定位到 references 小节了，小节里每个 "- " 项就是一条
+                items = self._split_bullet(raw)
         if not items:
             # 没有参考文献小节时，在全文里找 [1] [2] ... 条目。
             # 注意要支持列表符号，否则 pymupdf4llm 的 "- [1] xxx" 一条都匹配不上。
@@ -854,6 +957,30 @@ class DocumentParser:
                 buf = [body]
             elif _REF_ENTRY.match(body) or buf:
                 buf.append(body)
+        if buf:
+            items.append("\n".join(buf).strip())
+        return [it for it in items if it]
+
+    @staticmethod
+    def _split_bullet(raw):
+        """按行首的 markdown 列表符号切参考文献条目。
+
+        _split_numbered 只认 "[1]" / "1." 这种编号。
+        CLIP、APA 这类是「作者, 年份. 标题」开头，一条编号都没有，
+        但在 references 小节里每条都是一个 "- " 列表项，按列表符号切就够了。
+        """
+        items, buf = [], []
+        for ln in _lines(raw):
+            t = ln.strip()
+            if not t:
+                continue
+            if _LIST_MARK.match(t):
+                if buf:
+                    items.append("\n".join(buf).strip())
+                buf = [_LIST_MARK.sub("", t)]
+            elif buf:
+                # 续行：上一条被 PDF 折断了，接到当前条目后面
+                buf.append(t)
         if buf:
             items.append("\n".join(buf).strip())
         return [it for it in items if it]
