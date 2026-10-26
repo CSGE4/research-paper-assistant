@@ -3,15 +3,15 @@
 .env
 *.env
 !.env.example
+# 本地开发如果建了 secrets.toml，同样不能进仓库（线上在 Streamlit Cloud 面板里填）
+.streamlit/secrets.toml
 
-# ==================== 本地数据（体积大 / 每次入库都会变）====================
-# 这些都在首次上传文档后自动重建，不需要提交
-chroma/
-chroma_structured.json
-chroma_summary.json
-embedding.json
-bm25.pkl
-md5.txt
+# ==================== 本地数据 ====================
+# 入库产物（chroma/、chroma_structured.json 等）要提交。
+# 原因：Streamlit Cloud 的文件系统是临时的，仓库里也没有 PDF 原件，
+# 这些文件不提交的话，线上打开就是空知识库，必须先自己传论文才能问问题。
+# 已提交的样例数据约 17.6 MB，其中包括 6 篇论文、727 个文本块。
+# 下面这几项仍然不提交，因为都能自动重建：
 sqlite.db*
 translate.json
 translate_cache.json
