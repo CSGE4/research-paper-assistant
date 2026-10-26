@@ -13,8 +13,8 @@ def search_tools():
     if _loaded:
         return _cache
     _loaded = True
-    if not os.getenv("tavily_api_key"):
-        print("[tool_2] 未配置 tavily_api_key，联网搜索已关闭（本地检索不受影响）")
+    if not os.getenv("TAVILY_API_KEY"):
+        print("[tool_2] 未配置 TAVILY_API_KEY，联网搜索已关闭（本地检索不受影响）")
         return None
     from langchain_tavily import TavilySearch
     _cache = TavilySearch(max_results=5, topic="general")
