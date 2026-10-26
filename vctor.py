@@ -80,4 +80,4 @@ if __name__=="__main__":
     # print(a.get("1706.03762v1.pdf"))
     # print(a.hybrid_search_two("1706.03762v7"))
     # print(a.hybrid_search_two("重庆文理学院 杨熙 四级"))
-    print(a.result_search("重庆文理学院 杨熙 四级"))
+    print(a.result_search("Transformer"))

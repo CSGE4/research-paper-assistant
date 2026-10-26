@@ -24,4 +24,4 @@ separators = [
 chunk_size=1500
 chunk_overlap=150
 
-config_thread={"configurable":{"thread_id":"2"}}
+config_thread={"configurable":{"thread_id":"1"}}
