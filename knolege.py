@@ -154,9 +154,17 @@ class Knolege:
         has_similar=True 代表找到相似文档，需要交给agent二次判断
         has_similar=False 代表无相似文档，可以直接入库
     """
-        # 空文本保护
-        if not page_texts or all(len(t.strip()) == 0 for t in page_texts):
-            return True, 0.0,None
+        # 空文本保护：扫描件 / 图片型 PDF 提取不到文字。
+        # 这里绝对不能返回 True —— True 的意思是"存在相似文档"，会把流程带进相似度分支，
+        # 去读一个还不存在的 chroma_summary.json，最后报出"读取旧文档摘要失败"这种完全误导人的错。
+        if not page_texts:
+            raise Exception("这篇 PDF 没有提取到文字（可能是扫描件或图片型），请换一个有文字层的版本")
+        empty_pages = 0
+        for t in page_texts:
+            if len(t.strip()) == 0:
+                empty_pages = empty_pages + 1
+        if empty_pages == len(page_texts):
+            raise Exception("这篇 PDF 没有提取到文字（可能是扫描件或图片型），请换一个有文字层的版本")
 
         # 当前文档均值向量，用于相似度比对
         doc_embed = np.mean(page_embedding, axis=0).reshape(1, -1)
@@ -165,6 +173,11 @@ class Knolege:
 
         # 遍历历史文档，逐个计算均值向量相似度
         for old_file_name,old_file_embeds in self.embeddings_dict.items():
+            # 自己和自己比必然是 1.0。重传同一篇（比如上一次入库中途失败了）时，
+            # 不能把"上次留下的自己"当成"相似的另一篇"，否则会被拦在相似度分支里，
+            # 然后去读一个根本没写成的摘要文件，报出"读取旧文档摘要失败"。
+            if old_file_name == new_file_name:
+                continue
             old_doc_embedding = np.mean(old_file_embeds, axis=0).reshape(1, -1)
             sim = cosine_similarity(doc_embed, old_doc_embedding)[0][0]
             if sim > max_sim:
@@ -224,10 +237,6 @@ class Knolege:
 
     def _save_to_all_db(self,filename:str,data,page_embedding,str_hashlib):
         """公共入库：Chroma、摘要、md5、embeddings_dict、bm25统一写入"""
-        # 追加当前文档原始每页embedding
-        self.embeddings_dict[filename] = page_embedding
-        # 持久化写入json
-        self._save_embedding_store()
         metadata_list = []
         all_chunks = []
         ids = []
@@ -256,10 +265,14 @@ class Knolege:
         # 结构化提取（标题/作者/摘要/标题层级/表/图/公式/参考文献/附录）
         # 此时 data 是完整的按页解析结果，页序正确、内容完整，比事后从切块反推更准
         self._save_structured_info(filename, data)
-        # 保存入库文档的md5值
-        save_md5(str_hashlib,filename)
         # 将分词加入bm25模型中
         self.build_bm25(all_chunks,filename,page_nums)
+        # 所有"这篇已经入库了"的登记放到最后，中途任何一步失败，库里都不会留下半条记录。
+        # 否则会出现 md5.txt 拦不住重传、embedding.json 却认得"自己"的幽灵记录，
+        # 重传时被误判成"和另一篇文档相似"，然后去读一个没写成的摘要文件。
+        save_md5(str_hashlib,filename)
+        self.embeddings_dict[filename] = page_embedding
+        self._save_embedding_store()
         return True, None, filename  # (入库是否成功，旧的文件名，新的文件名)
     def upload_str_pdf(self,base64_str:str,filename:str):
         str_hashlib=get_str_md5(base64_str)
@@ -288,13 +301,25 @@ class Knolege:
         #如果存在相似文档，走下面流程,没有进行文件入库
         if is_skip:
             # 存在相似文档，调用Agent做二次决策
+            if not old_file_name:
+                raise Exception("相似度判断异常：没有匹配到具体文档，无法走相似度分支")
             from agent import agent
             try:
                 with open(config.file_path_summary,"r",encoding="utf-8") as f:
                     all_doc=json.load(f)
                     old_file_summary=all_doc[old_file_name]
-            except (FileNotFoundError, KeyError, json.JSONDecodeError) as e:
-                raise Exception(f"读取旧文档摘要失败: {e}")
+            except FileNotFoundError:
+                # 摘要文件还没生成，说明库里其实没有一篇完整的旧文档，
+                # 多半是上一次入库中途失败了，只留下半条记录
+                raise Exception(
+                    "库里还没有 chroma_summary.json，说明上一次入库没有完成。"
+                    "请删掉 embedding.json、md5.txt 和 chroma/ 目录后重新上传")
+            except KeyError:
+                raise Exception(
+                    "摘要文件里没有「%s」的记录，说明上一次入库没有完成。"
+                    "请删掉 embedding.json、md5.txt 和 chroma/ 目录后重新上传" % old_file_name)
+            except json.JSONDecodeError as e:
+                raise Exception(f"读取旧文档摘要失败（摘要文件内容损坏）: {e}")
             new_file_summary=self.simple_extract_summary(data[0]["text"])
             content=f"""新文档文件名为：{filename},文件摘要为：{new_file_summary}.
                         旧文档文件名为：{old_file_name},文档摘要为：{old_file_summary}.
