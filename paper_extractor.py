@@ -296,8 +296,38 @@ def _major_heading(line):
 # ============================ 三、碎片装配 ============================
 
 class ChunkAssembler:
-    """把 vctor 拿到的切块还原成"按文件、按页排序"的整篇 markdown。"""
+    """
+    把 vctor 拿到的切块还原成"按文件、按页排序"的整篇 markdown。
+    返回的结构为{
+            "source": source,
+            "text": self.assemble(source),
+            "page_start": min(pages),
+            "page_end": max(pages),
+            "page_count": len(set(pages)),
+            "pages": {p: "\n".join(t) for p, t in sorted(per_page.items())},
+            "chunks": g["chunks"],
+            "metadatas": g["metas"],
+        }
+        text结构为：<!-- page:1 -->
+                    第一段文本
 
+                    <!-- page:1 -->
+                    第二段文本
+        pages结构为：{1：第一页的文本，2：第二页的文本}
+        chunks：{
+                "index": i,
+                "id": cid,
+                "text": text ,
+                "metadata": meta,
+                "page": num,
+                "chunk_index": x,
+            }
+        metadatas：{
+                    "source": filename,
+                    "create_time": 时间,
+                    "page_number": 页码,
+                }
+    """
     def __init__(self, docs):
         self.docs = docs or {}
         self._groups = None
@@ -406,16 +436,28 @@ class DocumentParser:
     # ---- 主入口 ----
     def parse(self, doc, include_sections=True):
         text = doc["text"]
-        # 隐藏页码标记，但保持行数不变，这样 zip(...) 不会截断文档尾部
+        # 去除页码标记，但保持行数不变，这样 zip(...) 不会截断文档尾部
+        """
+        <!-- page:1 -->
+            第一段文本                       第一段文本
+                                    ---->
+         <!-- page:1 -->
+            第二段文本                       第二段文本
+        """
         prepped = _PAGE_TAG.sub("", text)
         lines = _lines(prepped)
-
+        #相当于把正文和页码塞进同个字典[{"line":文本},{"page"：页码},....]
         blocks = [{"line": ln, "page": pg} for ln, pg in zip(lines, self._page_map(text))]
         # 标题先算：后面要拿它把"大标题那一行"排除出小节
+        #title结构为{"value":,"guess_from_filename": ,"matched_filename":, "candidates": }
         title = self._title(doc, [], text)
+        #识别标题，给blocks打上标记
         self._tag_headings(blocks, (title or {}).get("value"))
+        #以标题为分割线，把正文挂载到对应的小节下面
         structure = self._split_sections(blocks)
+        #将一篇文档提取的各种内容，然后进行整合。补全文档标题树的结构，返回完整的结构字段
         result = self._fields(doc, prepped, structure, title=title)
+        #返回结构化字段，相当于文档的结构图
         if include_sections:
             result["sections"] = self._section_items(structure)
         return result
@@ -423,7 +465,9 @@ class DocumentParser:
     @staticmethod
     def _page_map(text):
         """逐行标注页码（靠 assemble() 写入的 {-n-} 标记）。
-        必须与 _lines() 行数严格一致，否则 zip 会静默截断文档尾部。"""
+        必须与 _lines() 行数严格一致，否则 zip 会静默截断文档尾部。
+        返回页码列表
+        """
         pages = []
         cur = None
         for ln in _lines(text):
@@ -436,9 +480,15 @@ class DocumentParser:
 
     # ---- 标题识别 ----
     def _tag_headings(self, blocks, title_value=None):
+        """
+        识别标题，给blocks打上标记
+        :param blocks: [{}]
+        :param title_value:
+        :return:
+        """
         for b in blocks:
             b["type"], b["level"], b["num"], b["title"] = "text", None, [], None
-            raw = b["line"]
+            raw = b["line"]#文本
             # 分页标记不是正文内容
             if not raw.strip() or _PAGE_TAG.match(raw.strip()) or _HRULE.match(raw.strip()):
                 b["type"] = "blank"
@@ -448,23 +498,26 @@ class DocumentParser:
             # 文章大标题本身不是小节：这里要用去掉井号后的纯文本比较，
             # 否则 "# 标题"（stripped 带 #）匹配不上 title 值，标题会被当成普通小节，
             # 也不会出现在 _headings 里。
+            #过滤主标题
             if title_value and title_value in (stripped, _strip_hashes(stripped)):
                 continue
 
             # 1) markdown 标题
             m = _MD_HEADING.match(stripped)
             if m:
-                title = _strip_hashes(m.group(2))
-                lvl = min(len(m.group(1)), 3)
+                title = _strip_hashes(m.group(2))#拿文本
+                lvl = min(len(m.group(1)), 3)#拿等级，上限为3
                 num, kind = [], "heading"
+                #参考文献和附录强制一级
                 if _REFS_MARK.match(title):
                     kind, lvl = "refs", 1
                 elif _APPENDIX_MARK.match(title):
                     kind, lvl = "appendix", 1
+
                 else:
-                    mp = _NUMBERED_HEADING.match(title)
-                    if mp and _is_headish(mp.group(2)):
-                        num, title = _norm_number(mp.group(1), title), mp.group(2)
+                    mp = _NUMBERED_HEADING.match(title)#匹配小标题
+                    if mp and _is_headish(mp.group(2)):#匹配文字
+                        num, title = _norm_number(mp.group(1), title), mp.group(2)#编号，文本
                 b.update(type="heading", level=self._norm_level(lvl, num, title),
                          num=num, title=title, kind=kind)
                 continue
@@ -481,6 +534,7 @@ class DocumentParser:
             # 3) 摘要/关键词行：标签后面还有正文时，这是正文而不是标题
             #    （PDF 直接转出来常见 "摘要：xxx"，没有 markdown 标记）
             #    注意：单纯的 "摘要" / "## 摘要" 不在这里拦，它仍是一个小节标题。
+            #过滤摘要/关键词 内联行
             abs_inline = _ABSTRACT_MARK.match(stripped)
             if abs_inline and (abs_inline.group(2) or "").strip():
                 continue
@@ -489,14 +543,17 @@ class DocumentParser:
                 continue
 
             # 4) 编号标题（无 markdown 标记）
+            #没有 `#`、没有整行加粗，但是以数字编号开头的章节行，把它识别成目录标题
             parts = _numbered_parts(stripped)
             if parts:
                 num, title = parts
-                b.update(type="heading", level=min(len(num), 3) or 1, num=num,
+                b.update(type="heading", level=min(len(num), 3), num=num,
                          title=title, kind="heading")
                 continue
 
             # 5) 大标题（无编号）
+            #没有 #、没有加粗、没有数字编号的特殊独立大标题，
+            # 目前主要是 **Appendix（附录） 这类纯文本标记行，识别成一级目录节点
             major = _major_heading(stripped)
             if major:
                 kind, title = major
@@ -538,7 +595,7 @@ class DocumentParser:
         1 -> 一级；1.1 -> 二级；1.1.1 -> 三级；带编号的标题不看 markdown 井号数量。
         没有编号时，文章大标题（H1）保持一级，其余按 markdown 级别。"""
         if num:
-            return min(len(num), 3) or 1
+            return min(len(num), 3)
         if md_level == 1:
             return 1
         # 摘要/致谢/关键词等固定章节没有编号，也归为一级标题
@@ -548,6 +605,11 @@ class DocumentParser:
         return min(md_level, 3)
 
     def _split_sections(self, blocks):
+        """
+        以标题为分割线，把正文挂载到对应的小节下面
+        :param blocks: [{}]
+        :return:section->[current:{"title","level","num","kind","page","lines","parent"},...]
+        """
         sections = []
         current = None
         for b in blocks:
@@ -582,7 +644,9 @@ class DocumentParser:
 
     @staticmethod
     def _section_items(sections):
-        """把 sections 转成对外结构：path 为层级路径，content 为该节正文。"""
+        """把 sections 转成对外结构：path 为层级路径，content 为该节正文。
+        section->[current:{"title","level","num","kind","page","lines","parent"},...]
+        """
         items = []
         for sec in sections:
             content = "\n".join(ln for ln, _, _ in sec["lines"]).strip()
@@ -601,6 +665,7 @@ class DocumentParser:
 
     # ---- 各字段 ----
     def _fields(self, doc, text, sections, title=None):
+        """拿到各种字段进行结构化处理。就是将一篇文档提取各种内容，然后进行整合。补全文档标题树的结构，返回完整的结构字段"""
         if title is None:
             title = self._title(doc, sections, text)
         authors = self._authors(text, title)
@@ -614,6 +679,7 @@ class DocumentParser:
         headings = self._headings(sections)
         # 文章大标题也是结构的一部分：它被排除出小节后，这里补回结构的根
         title_val = (title or {}).get("value")
+        #拿到标题的值，如果这个标题不为空，并且在标题树里还没有出现过，才保留它；否则不要
         if title_val and not any(h.get("title") == title_val for h in headings["tree"]):
             headings["tree"].insert(0, {
                 "title": title_val, "level": 1, "number": None,
@@ -647,7 +713,15 @@ class DocumentParser:
         }
 
     def _title(self, doc, sections, text):
+        """
+        提取文档标题，先筛选一级/二级标题，没有就找整行加粗的，在没有就找正文中最像标题的句子。
+        :param doc:
+        :param sections:
+        :param text:
+        :return:
+        """
         source = doc["source"]
+        #删除文件名后缀
         stem = re.sub(r"\.(pdf|docx?|md|txt)$", "", source, flags=re.I)
         pages = doc.get("pages") or {}
         page1 = pages.get(min(pages)) if pages else None
@@ -657,9 +731,12 @@ class DocumentParser:
         #    一级二级都算：有的论文（Scaling Laws）大标题是 "## 标题"，
         #    只认 "#" 的话会滑到下一行的加粗作者上。
         for ln in first_page:
+            #清除干扰，保留”#“
             m = _MD_HEADING.match(_strip_md(ln))
+            #三级标题及以上
             if not m or len(m.group(1)) > 2:
                 continue
+            #去掉”#“
             t = _strip_hashes(m.group(2))
             if not t or _STANDARD_SECTION.match(t):
                 continue
@@ -721,6 +798,13 @@ class DocumentParser:
 
     @staticmethod
     def _title_result(value, stem, candidates=None):
+        """
+        结构化标题，文件名
+        :param value:
+        :param stem:
+        :param candidates:
+        :return:
+        """
         return {
             "value": value,
             "guess_from_filename": stem,
@@ -729,39 +813,53 @@ class DocumentParser:
         }
 
     def _authors(self, text, title):
+        """
+        value就是标题
+        {"value":,"guess_from_filename": ,"matched_filename":, "candidates": }
+        :param text: 去除了标记的正文
+        :param title: 标题集->{"value":,"guess_from_filename": ,"matched_filename":, "candidates": }
+        :return: {"value":, "raw": , "origin": ""}
+        """
         lines = _lines(text)
         # 1) "作者：xxx" 显式标签
         for ln in lines[:80]:
-            m = _AUTHOR_LABEL.match(_strip_md(ln))
+            m = _AUTHOR_LABEL.match(_strip_md(ln))#先匹配最有可能是作者名字的字符串
             if m:
-                names = self._split_authors(m.group(2))
+                names = self._split_authors(m.group(2))#切割作者名，返回作者集-->[]
                 if names:
                     return {"value": names, "raw": m.group(2), "origin": "label"}
         # 2) 标题行后面紧跟的短行（带分隔符、像人名）
         title_val = (title or {}).get("value")
         start = 0
         if title_val:
-            for i, ln in enumerate(lines[:80]):
-                if title_val in _strip_md(ln):
+            for i, ln in enumerate(lines[:80]):#遍历前80行，i为下标，ln为文本
+                if title_val in _strip_md(ln):#如果标题在文本中
                     start = i + 1
                     break
         plain_names, plain_raw = [], []
         for ln in lines[start:start + 6]:
+            #没有正文就跳
             if _has_html_comment(ln):
                 continue
             # 先把上标（单位编号/脚注符号）清掉再判断：不清的话
             # "Tri Dao<sup>†</sup> , Daniel Y. Fu..." 会既不像人名又超长被跳过。
             t = _strip_sup(_strip_md(ln))
+            #清理完没有正文，跳
             if not t or _has_html_comment(t):
                 continue
+            #如果属于摘要或关键词，跳
             if _ABSTRACT_MARK.match(t) or _KEYWORDS_MARK.match(t):
                 continue
+
             if _MD_HEADING.match(t) or _major_heading(t) or _STANDARD_SECTION.match(t):
                 continue
+
             if _numbered_parts(t) or _APPENDIX_MARK.match(t):
                 continue
+            #文本太长不象作者名，跳
             if len(t) > 120:
                 continue
+            #切割作者名，返回作者集->[]
             names = self._split_authors(t)
             if len(names) >= 2:
                 plain_names.extend(names)
@@ -772,7 +870,7 @@ class DocumentParser:
         #     否则后面的作者会丢（Attention 论文的作者分 3 行）。
         bold_names, bold_raw = [], []
         for ln in lines[start:start + 20]:
-            found = self._names_from_bold_line(ln)
+            found = self._names_from_bold_line(ln)#从"一行里多个加粗片段"中取出作者名。
             if found:
                 bold_names.extend(found)
                 bold_raw.append(_strip_md(ln)[:100])
@@ -784,7 +882,7 @@ class DocumentParser:
             return {"value": plain_names, "raw": " / ".join(plain_raw)[:200],
                     "origin": "line_after_title"}
         # 3) 扫描件/证书：从图片文字层里按 "名：/姓名：/作者：" 取
-        pic = self._authors_from_picture_text(text)
+        pic = self._authors_from_picture_text(text)#扫描件没有版式信息，姓名往往挂在 OCR 图片文字层的 '名：' 字段上。
         if pic:
             return pic
         return {"value": [], "raw": None, "origin": None}
@@ -834,6 +932,11 @@ class DocumentParser:
 
     @staticmethod
     def _split_authors(line):
+        """
+        切割作者名，返回作者集-》[]
+        :param line:
+        :return: []
+        """
         # 上标（单位编号/†‡ 脚注）先清掉，否则名字后面挂一堆标签，个个都不像人名
         raw = _strip_sup(_strip_md(line))
         if not raw or len(raw) > 160:
@@ -909,19 +1012,26 @@ class DocumentParser:
         return {"value": [], "raw": None}
 
     def _references(self, text, sections):
-        sec = next((s for s in sections if s["kind"] == "refs"), None)
-        if sec is None:
+        """
+        匹配参考文献
+        :param text: 向量块
+        :param sections: [current:{"title","level","num","kind","page","lines","parent"},...]
+        :return:{"title": title, "items": items（文本）, "citations": citations（编号）}
+        """
+        sec = next((s for s in sections if s["kind"] == "refs"), None)#只抓第一个kind为refs的
+        if sec is None:#没找到就正则匹配
             sec = next((s for s in sections
                         if re.search(r"参考文献|^References?$|Bibliography", s["title"] or "", re.I)), None)
         items, title = [], None
         if sec is not None:
             title = sec["title"]
-            raw = "\n".join(_strip_md(ln) for ln, _, _ in sec["lines"])
-            items = self._split_numbered(raw)
+            raw = "\n".join(_strip_md(ln) for ln, _, _ in sec["lines"])#拼接参考文献
+            items = self._split_numbered(raw)#拆解参考文献
             if not items:
                 # 没有 [1]/1. 编号的（CLIP、APA 这类作者-年份格式），
                 # 既然已经定位到 references 小节了，小节里每个 "- " 项就是一条
                 items = self._split_bullet(raw)
+        #如果还没有就全文正则匹配
         if not items:
             # 没有参考文献小节时，在全文里找 [1] [2] ... 条目。
             # 注意要支持列表符号，否则 pymupdf4llm 的 "- [1] xxx" 一条都匹配不上。
@@ -1200,6 +1310,9 @@ class DocumentParser:
     # ---- 标题树 ----
     @staticmethod
     def _headings(sections):
+        """将section传入，然后将字段添加进树，返回{level1，level2，level3，tree}
+
+        """
         tree = []
         for sec in sections:
             tree.append({
@@ -1459,7 +1572,7 @@ def extract_from_pages(data, filename, parser=None):
     页序天然正确、内容完整，因此不需要 ChunkAssembler 那套"按 (页, 页内序号)
     排序 + 插入分页标记"的还原逻辑，也不会遇到跨块截断。
 
-    返回与 extract_from_docs 完全相同的字段结构。
+    返回与 extract_from_docs 完全相同的字段结构。{文件名: 结构化结果}
     """
     data = list(data or [])
     page_texts, metas = [], []
