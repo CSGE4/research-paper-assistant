@@ -16,6 +16,9 @@ def get_agent():
     """Streamlit 每点一次交互都会把脚本从头重跑一遍，
     用 cache_resource 保证智能体（连同它背后的 sqlite 连接、向量库客户端）
     只在第一次提问时创建一次，后面直接复用，不会越用越慢。
+
+    智能体只有一个：联网那件事靠 invoke 时传的 context 换提示词，
+    不另外建 agent，所以这里不带参数。
     """
     from agent import main_agent
     return main_agent
@@ -35,6 +38,19 @@ if "history" not in st.session_state:
 
 with st.sidebar:
     st.caption("当前会话：" + st.session_state["thread_id"])
+
+    # 联网开关，默认关。关着的时候提示词里没有联网那段规则；
+    # 打开之后这同一个智能体会拿到 system_prompt + WEB_RULES（见 agent.py）
+    use_web = st.toggle(
+        "联网搜索",
+        value=False,
+        help="开启后先查本地文献库，本地查不到再查互联网，回答里会标出链接。",
+    )
+    if use_web:
+        st.caption("本次回答：先本地，后联网")
+    else:
+        st.caption("本次回答：仅本地文献库")
+
     if st.button("清空本次对话"):
         st.session_state["history"] = []
         # 换一个 thread_id 等于让智能体开一段新记忆，旧记忆还留在库里，不影响使用
@@ -56,13 +72,15 @@ if question:
     with st.chat_message("user"):
         st.markdown(question)
 
-    # 2. 交给智能体，它自己决定调 local_search 还是 translate_paper
+    # 2. 交给智能体，它自己决定调 local_search、translate_paper 还是 web_search
     with st.chat_message("assistant"):
         with st.spinner("检索文献中…"):
             cfg = {"configurable": {"thread_id": st.session_state["thread_id"]}}
             result = get_agent().invoke(
                 {"messages": [HumanMessage(question)]},
                 config=cfg,
+                # 开关从这里传进 agent：pick_prompt 读它决定用哪套提示词
+                context={"use_web": use_web},
             )
             answer = result["messages"][-1].content
             # 有的模型会把 content 返回成列表（分段内容），这里统一转成字符串

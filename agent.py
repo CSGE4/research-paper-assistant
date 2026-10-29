@@ -66,10 +66,64 @@ agent=create_agent(
     model
 )
 
+# 联网工具只是包一层：没配 TAVILY_API_KEY 时返回一句话让模型退回去用本地检索，
+# 而不是让整个问答页报错。返回拼好的纯文本，模型只认文本。
+def web_search(query: str):
+    """联网检索公开资料。只有本地文献库确实查不到相关内容时才使用。
+        Args:
+            query: 要在互联网上检索的关键词或问题
+        """
+    tv = search_tools()
+    if tv is None:
+        return "联网搜索未开启（没有配置 TAVILY_API_KEY），只能依据本地检索结果作答。"
+    data = tv.invoke({"query": query})
+    items = []
+    if isinstance(data, dict):
+        items = data.get("results", [])
+    if not items:
+        return "联网搜索没有返回结果。"
+    lines = []
+    for i, it in enumerate(items, 1):
+        content = it.get("content", "")
+        if len(content) > 300:
+            content = content[:300] + "…"
+        lines.append("%d. %s\n%s\n%s" % (i, it.get("title", ""), it.get("url", ""), content))
+    return "\n\n".join(lines)
+
+# 联网时才追加的规则。必须显式覆盖前面「查不到就说库中没有相关资料」那条，
+# 否则开关打开了，模型也只会继续回答"库中没有"，联网等于没开。
+WEB_RULES = """
+【本次已开启联网（多了一个 web_search 工具）】
+1. 依然优先用 local_search。只有本地确实查不到时，才调用 web_search。
+2. 用联网内容作答时，结论后面标「（来自互联网）」，并在最后一行加：
+   联网来源：<链接>
+3. 不能把联网内容说成本地文献里的内容，两边出处必须分开写。
+4. 本地与联网冲突时，以本地文献为准，并说明存在冲突。
+5. 前面「本地查不到就回答库中没有相关资料」那条，本次改成：先转 web_search，
+   联网也没有结果时，再回答本地和网上都没有。
+"""
+
+# 一个智能体，两套提示词。联网的值从本次调用传进来（app.py 里 invoke 的 context 参数），
+# 所以同一个 agent 对象能同时服务联网和不联网两种会话，不用建两个。
+from langchain.agents.middleware import dynamic_prompt
+#导入dynamic_prompt装饰器，动态监测智能体状态，并根据当前状态切换提示词
+"""
+我--中间件--模型--工具--中间件--模型（此时回答）
+中间件的次数 = 模型醒的次数 = 1 + 工具调用次数。
+"""
+@dynamic_prompt
+def pick_prompt(request) -> str:
+    use_web = False
+    if request.runtime.context:
+        use_web = request.runtime.context.get("use_web", False)
+    if use_web:
+        return system_prompt + WEB_RULES
+    return system_prompt
+
 main_agent=create_agent(
     model,
-    tools=[local_search,translate_paper],
-    system_prompt=system_prompt,
+    tools=[local_search,translate_paper,web_search],
+    middleware=[pick_prompt],
     checkpointer=checkpoint,
 )
 if __name__=="__main__":
