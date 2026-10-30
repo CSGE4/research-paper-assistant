@@ -5,6 +5,16 @@ Streamlit采用重渲染机制，点击确认按钮后页面刷新，脚本会�
 缺陷影响：会重复执行PDF解析、向量生成，增加接口耗时与token消耗。
 未来优化方案：利用session_state增加文件处理标记，区分已处理任务，跳过重复后端计算。
 """
+# 本文件是 Streamlit 的入口页（主页面），管三件事：
+#   1. 上传 PDF 并入库
+#   2. 上传时撞到相似文档，给出"覆盖/都留/取消"三个选择
+#   3. 展示任意一篇已入库文档的结构化抽取结果
+# 问答不在这个文件里，在 pages/app.py（Streamlit 会自动把 pages/ 下的文件变成侧边栏入口）。
+#
+# Streamlit 的执行模型要记住：每点一次按钮，整个脚本【从头重跑一遍】。
+# 所以页面上的东西不是"事件驱动"的，而是"每次重跑时按当前状态重新画一遍"，
+# 需要跨重跑保留的东西（服务对象、待确认任务）必须放进 st.session_state。
+
 # Streamlit Cloud 的 Secrets 不会自动变成环境变量，
 # 而这个项目里所有模块读的都是 os.getenv，所以第一件事是把 Secrets 灌进 os.environ。
 # 必须放在下面这些 import 之前：vctor 在 import 的那一刻就会 new 一个 Knolege()。
@@ -46,6 +56,9 @@ def parse_agent_json(ai_msg_content: str):
     :param ai_msg_content: AIMessage.content 拿到的文本
     :return: dict / None 解析成功返回字典，失败返回None
     """
+    # 智能体返回的是自然语言里夹一段 JSON，不能直接 json.loads。
+    # 分两层兜底：先按 ```json 代码块取，取不到再按大括号取——
+    # 模型偶尔会忘记写代码块标记，那时候只能靠大括号猜。
     try:
         # 正则匹配 ```json 与 ``` 之间内容，re.S 让.匹配换行
         pattern = r"```json(.*?)```"
@@ -62,11 +75,15 @@ def parse_agent_json(ai_msg_content: str):
             json_str = match.group(1).strip()
 
         # 清洗中文引号
+        # 模型输出中文时经常把 " 写成 “ ”，那是合法的中文标点但不是合法 JSON，
+        # 不换掉的话 json.loads 一定失败。
         json_str = json_str.replace("“", '"').replace("”", '"')
         print(f"[parse_agent_json] 待解析字符串：{json_str}")
 
         data = json.loads(json_str)
         # 校验必须存在的三个key
+        # 只校验字段在不在、不校验内容对不对：内容是给用户看的建议文案，
+        # 缺字段才是程序会崩的地方（后面按 key 取值）。
         required_keys = {"sim_desc", "action", "reason"}
         if not required_keys.issubset(data.keys()):
             print(f"JSON缺少必要字段，当前keys:{data.keys()}")
@@ -107,6 +124,8 @@ def render_doc(name: str):
         st.write("**关键词**：" + "、".join(kw))
 
     # 标题层级（level 1/2/3），大标题加粗
+    # 用全角空格按层级缩进，因为 Streamlit 的 markdown 会吃掉行首的普通空格，
+    # 缩进就没了，层级看起来全是平的。
     st.markdown("#### 文档结构")
     for h in d["headings"]["tree"]:
         num = f"{h['number']} " if h["number"] else ""
@@ -128,6 +147,7 @@ def render_doc(name: str):
                 seen = {}
                 for i, h in enumerate(tb["header"] or []):
                     name = clean_cell(h).strip()
+                    # 空表头 pandas 也会报错，补一个"列N"占位
                     if not name:
                         name = "列%d" % (i + 1)
                     if name in seen:
@@ -139,11 +159,13 @@ def render_doc(name: str):
 
                 ncol = len(header)
                 body = []
+                # rows[0] 是表头，已经从 tb["header"] 拿过了，所以从 [1:] 开始
                 for row in tb["rows"][1:]:
                     new_row = []
                     for cell in row:
                         new_row.append(clean_cell(cell))
                     # 格子数和表头对不上时补齐或截断，否则 pandas 也会报错
+                    # 论文里的合并单元格经常导致某一行少几列，不能指望它对齐
                     while len(new_row) < ncol:
                         new_row.append("")
                     if len(new_row) > ncol:
@@ -155,6 +177,7 @@ def render_doc(name: str):
                 elif body:
                     frame = pd.DataFrame(body)
                 else:
+                    # 只有表头没有数据行，也要画出来（这种表在论文里通常是纯表头示意）
                     frame = pd.DataFrame(columns=header)
                 st.dataframe(frame, use_container_width=True, hide_index=True)
             else:
@@ -180,6 +203,7 @@ def render_doc(name: str):
             st.write(ap["content"])
 
     # 没识别到的字段明说，而不是静默留白
+    # 留白会让人以为"这篇论文没有作者"，其实是没抽出来，性质完全不同。
     if d["warnings"]:
         with st.expander(f"⚠️ 未能识别的字段（{len(d['warnings'])}）"):
             for w in d["warnings"]:
@@ -200,6 +224,8 @@ def render_doc(name: str):
                     continue
                 mark = CN.get(s, s)
                 extra = ""
+                # 被丢弃的幻觉答案也展示出来，让人看到模型原本想写什么，
+                # 这比只写"已丢弃"更能说明核对机制真的在工作
                 if s == "rejected_hallucination":
                     extra = f"（模型曾给出：{det.get(f, {}).get('model')}）"
                 elif s == "model" and det.get(f, {}).get("rule"):
@@ -210,6 +236,8 @@ def render_doc(name: str):
 def render_all_docs():
     """独立入口：列出已入库文档，选一个查看其结构。"""
     try:
+        # 文档列表从结构化结果里取，不查向量库：
+        # 两边理论上一致，但结构化文件才是这个页面真正要读的数据源
         names = sorted(vctor_story_search().get_structured_all().keys())
     except Exception as e:
         st.warning(f"读取结构化结果失败：{e}")
@@ -229,8 +257,13 @@ file=st.file_uploader(
     accept_multiple_files=False,
 )
 
+# service 和 pending_task 必须挂在 session_state 上：
+# 页面每次重跑都会把模块级变量重置，只有 session_state 能跨重跑活下来。
+# service 存的是 Knolege 实例（里面握着向量库连接和 BM25 索引，重建一次很贵）。
 if "service" not in st.session_state:
     st.session_state["service"]=Knolege()
+# pending_task 存"检测到相似文档，等用户按按钮"这件事。
+# 没有它的话，用户点按钮引发重跑，temp_pdf 里那份待入库的解析结果就没人认领了。
 if "pending_task" not in st.session_state:
     st.session_state.pending_task = None
 
@@ -244,7 +277,11 @@ if file is not None:
         file_type=type[-3:]
         if file_type=="pdf":
             a=file.read()
+            # 走 base64 而不是字节流：后端接口统一收 base64 字符串，
+            # 同一份内容 base64 编码结果稳定，md5 才能当作文件指纹用
             file_base_str=base64.b64encode(a).decode("utf-8")
+            # 返回值有三种形态，见 knolege.upload_str_pdf 的说明：
+            #   False → 完全重复；True → 已入库；dict → 有相似文档，等用户决定
             result,old_file_name,new_file_name=st.session_state["service"].upload_str_pdf(file_base_str,filename=name)
             st.write(result)
             if result is False:
@@ -255,6 +292,7 @@ if file is not None:
                 st.session_state.pending_task = None
             else:
                 # 取出AIMessage
+                # 智能体的返回是一串消息，最后一条才是它写的内容
                 aimsg = result["messages"][1]
                 agent_raw_content = aimsg.content
                 st.write("===调试原始内容===")
@@ -262,6 +300,8 @@ if file is not None:
 
                 agent_json = parse_agent_json(agent_raw_content)
                 # 组装pending_task
+                # 这一步【没有入库】，只是把待确认的信息挂起来，
+                # 真正的写入发生在下面按钮分支里的 real_save_pdf。
                 if agent_json is not None:
                     st.session_state.pending_task = {
                         "new_filename": new_file_name,
@@ -275,11 +315,15 @@ if file is not None:
                     st.error("智能体返回结果解析失败，请重试上传！")
                     st.session_state.pending_task = None
         else:
+            # txt / csv 目前只读不解析入库，属于预留入口
             text=file.getvalue().decode("utf-8")
         time2=datetime.datetime.now()
         all_time=(time2-time1).total_seconds()
         st.write(all_time)
 # ===================== 【重点！！顶格写，没有缩进！！】=====================
+# 这一段必须和上面的 if file is not None 平级。
+# 原因：用户点"覆盖"按钮时页面重跑，这一次 file 是空的（上传组件被重置），
+# 如果这段缩进在上面那个 if 里，按钮就永远不会被处理，点了没反应。
 if st.session_state.pending_task is not None:
     task = st.session_state.pending_task
     st.divider()
@@ -295,6 +339,8 @@ if st.session_state.pending_task is not None:
         btn_cancel = st.button("❌取消本次上传")
 
     if btn_overwrite:
+        # 必须先删旧的再写新的：同名文件重传时块数可能变少，
+        # 不删的话旧的高编号块会残留，变成"搜得到但内容已过期"的脏数据
         st.session_state["service"].delete_file(task["old_filename"])
         st.session_state["service"].real_save_pdf(task["new_filename"])
         st.success("操作完成：已覆盖旧文档，新文档入库成功！")
@@ -308,6 +354,7 @@ if st.session_state.pending_task is not None:
         st.rerun()
 
     if btn_cancel:
+        # 取消只是把挂起的任务扔掉，什么数据都没写过，所以不需要回滚任何东西
         st.warning("已取消，本次文件不会入库")
         st.session_state.pending_task = None
         st.rerun()
