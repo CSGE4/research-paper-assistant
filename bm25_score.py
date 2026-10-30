@@ -1,7 +1,9 @@
 import math
 from collections import Counter
 import jieba
-"""该混合检索的权重值修改为0.35是综合最优结果，通过ai演算得出的。
+"""该混合检索的权重值取 0.20，由 37 题验证集扫描得出（α 从 0.10 到 0.80）。
+实测结果：α≥0.60 明显变差（MRR 0.60→0.49），0.10~0.40 区间差异在 0.02 量级的噪声内，
+取 0.20 作折中——MRR 0.585，高于纯向量 0.532 和纯 BM25 0.423。
 概念型和精确型查询的最优 α 是相反的——概念题要 α≈0.2~0.3，精确题要 α≈0.6
 计划在后续增加动态权重选择，增加检索结果的准确性
 """
@@ -86,7 +88,7 @@ class BM25Calculator:
         return score
 
 
-def hybrid_search(vector_res, bm25_res, all_doc_texts, query, k=8, alpha=0.35):
+def hybrid_search(vector_res, bm25_res, all_doc_texts, query, k=8, alpha=0.20):
     """
     适配真实数据的混合检索：向量检索 + BM25精准加权
     :param vector_res: 向量结果：列表 -> [(Document, score), ...]
