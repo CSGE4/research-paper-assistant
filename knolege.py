@@ -470,9 +470,11 @@ class Knolege:
         new_corpus = []
         new_source = []
         for token, src in zip(self.bm25_corpus, self.bm25_chunk_source):
-            # 注意这里的 src 是 {"source":名字, "page_number":页码} 这个字典，
-            # 拿它跟文件名字符串直接比永远不会相等（历史遗留写法，目前实际删不掉 bm25 条目）
-            if src != filename:
+            # src 是 {"source":名字, "page_number":页码} 这个字典，
+            # 要取 "source" 才能跟文件名字符串比较。
+            # 早期这里直接写成 src != filename，等于拿字典跟字符串比，
+            # 永远不相等，一条都删不掉——删完文档后 BM25 还能召回它的块。
+            if src["source"] != filename:
                 new_corpus.append(token)
                 new_source.append(src)
         self.bm25_corpus = new_corpus
