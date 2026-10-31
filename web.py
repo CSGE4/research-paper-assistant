@@ -334,7 +334,7 @@ if st.session_state.pending_task is not None:
     st.info(task["agent_suggest"])
     # 点按钮后可能要走一次重新解析（内存里的缓存过期时），最长约一分钟。
     # 提前说清楚，免得用户以为没反应又重传一遍，最后库里多出一份。
-    st.caption("点按钮后最多需要约 1 分钟，请不要刷新页面或重复上传")
+    st.caption("点按钮后最多需要约 1 分钟，请不要刷新页面或重复上传。该文件正在入库中")
 
     col1, col2, col3 = st.columns(3)
     with col1:
