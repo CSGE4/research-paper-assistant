@@ -1,11 +1,10 @@
 """
 【前端交互限制与处理】
-Streamlit采用重渲染机制，点击按钮后页面刷新，脚本会完整重跑，可能第二次进入文件上传分支。
+Streamlit采用重渲染机制，点击按钮后页面刷新，脚本会完整重跑，会二次进入文件上传分支。
 
-已处理：用 session_state 的 handled_upload（文件名+大小）标记本次会话处理过的文件，
-        重跑时直接跳过，不再重复解析 PDF、重复做 embedding。
-        这个标记只在同一个浏览器会话内有效，换会话仍会重跑一次；
-        真正挡住重复入库的是 MD5 校验，标记只是省掉重复的后端计算。
+处理方式：只在"已挂起、正等用户确认"时跳过重复解析（pending_task 里记着文件名）；
+          其余情况都照常走——已入库的文件由 MD5 直接兜住（只比一次 md5，不解析、不嵌入），
+          想重传一次也能重传。不要用"文件名+大小"之类的指纹去拦，那会把重传也拦掉。
 """
 # 本文件是 Streamlit 的入口页（主页面），管三件事：
 #   1. 上传 PDF 并入库
@@ -276,14 +275,14 @@ if file is not None:
     size=file.size/1024
     st.write(f"文件名{name},文件类型{type}，文件大小{size:.2f}KB")
     # Streamlit 每次重跑都会带着上传组件里的文件再跑一遍脚本。
-    # 不拦一下的话，同一个文件会被反复解析、反复做 embedding（是要花钱的），
-    # 用户看到的现象就是"三个按钮一遍遍冒出来"。
-    # 用文件名+大小当指纹：处理过的直接跳过，换了文件指纹才变。
-    upload_key="%s|%d" % (file.name,file.size)
-    if st.session_state.get("handled_upload")==upload_key:
-        st.caption("这个文件本次已经处理过；要重新入库，先移除再重新选择")
+    # 只有"已经挂起、正等用户确认"这一种情况值得跳过：答案已经有了，
+    # 再解析一遍纯属浪费一分钟，点按钮还会卡住。
+    # 其余情况一律照常走：已入库的由 MD5 直接兜住（只比一次 md5，不解析不嵌入），
+    # 想重传一次也能重传——不能用"文件名+大小"当指纹去拦，那会把重传也拦掉。
+    pending=st.session_state.pending_task
+    if pending is not None and pending.get("new_filename")==name:
+        st.caption("这个文件正在等待确认，请看下方面板")
     else:
-        st.session_state["handled_upload"]=upload_key
         with st.spinner("文件导入中"):
             file_type=type[-3:]
             if file_type=="pdf":
@@ -324,9 +323,6 @@ if file is not None:
             else:
                 # txt / csv 目前只读不解析入库，属于预留入口
                 text=file.getvalue().decode("utf-8")
-else:
-    # 文件被移除后要清掉指纹，否则重新选同一个文件会被误判成"已处理过"
-    st.session_state["handled_upload"]=None
 # ===================== 【重点！！顶格写，没有缩进！！】=====================
 # 这一段必须和上面的 if file is not None 平级。
 # 原因：用户点"覆盖"按钮时页面重跑，这一次 file 是空的（上传组件被重置），
