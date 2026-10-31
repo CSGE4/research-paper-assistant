@@ -1,9 +1,11 @@
 """
-【已知前端交互限制】
-Streamlit采用重渲染机制，点击确认按钮后页面刷新，脚本会完整重跑，触发二次进入文件上传分支。
-防护机制：使用MD5校验文件指纹，第二次执行时直接拦截入库，不会向向量库、摘要库写入重复数据。
-缺陷影响：会重复执行PDF解析、向量生成，增加接口耗时与token消耗。
-未来优化方案：利用session_state增加文件处理标记，区分已处理任务，跳过重复后端计算。
+【前端交互限制与处理】
+Streamlit采用重渲染机制，点击按钮后页面刷新，脚本会完整重跑，可能第二次进入文件上传分支。
+
+已处理：用 session_state 的 handled_upload（文件名+大小）标记本次会话处理过的文件，
+        重跑时直接跳过，不再重复解析 PDF、重复做 embedding。
+        这个标记只在同一个浏览器会话内有效，换会话仍会重跑一次；
+        真正挡住重复入库的是 MD5 校验，标记只是省掉重复的后端计算。
 """
 # 本文件是 Streamlit 的入口页（主页面），管三件事：
 #   1. 上传 PDF 并入库
@@ -263,63 +265,68 @@ file=st.file_uploader(
 if "service" not in st.session_state:
     st.session_state["service"]=Knolege()
 # pending_task 存"检测到相似文档，等用户按按钮"这件事。
-# 没有它的话，用户点按钮引发重跑，temp_pdf 里那份待入库的解析结果就没人认领了。
+# 它自己带着 pdf_base64，所以就算页面重跑、内存里的解析结果没了，
+# 点按钮时也能靠它重新入库，不会因为缓存过期而崩。
 if "pending_task" not in st.session_state:
     st.session_state.pending_task = None
 
 if file is not None:
-    with st.spinner("文件导入中"):
-        time1=datetime.datetime.now()
-        name=file.name
-        type=file.type
-        size=file.size/1024
-        st.write(f"文件名{name},文件类型{type}，文件大小{size:.2f}KB")
-        file_type=type[-3:]
-        if file_type=="pdf":
-            a=file.read()
-            # 走 base64 而不是字节流：后端接口统一收 base64 字符串，
-            # 同一份内容 base64 编码结果稳定，md5 才能当作文件指纹用
-            file_base_str=base64.b64encode(a).decode("utf-8")
-            # 返回值有三种形态，见 knolege.upload_str_pdf 的说明：
-            #   False → 完全重复；True → 已入库；dict → 有相似文档，等用户决定
-            result,old_file_name,new_file_name=st.session_state["service"].upload_str_pdf(file_base_str,filename=name)
-            st.write(result)
-            if result is False:
-                st.warning("该文件MD5已存在，完全重复，跳过本次上传")
-                st.session_state.pending_task = None
-            elif result is True:
-                st.success("文档入库完成，无相似文档")
-                st.session_state.pending_task = None
-            else:
-                # 取出AIMessage
-                # 智能体的返回是一串消息，最后一条才是它写的内容
-                aimsg = result["messages"][1]
-                agent_raw_content = aimsg.content
-                st.write("===调试原始内容===")
-                st.code(agent_raw_content)
-
-                agent_json = parse_agent_json(agent_raw_content)
-                # 组装pending_task
-                # 这一步【没有入库】，只是把待确认的信息挂起来，
-                # 真正的写入发生在下面按钮分支里的 real_save_pdf。
-                if agent_json is not None:
-                    st.session_state.pending_task = {
-                        "new_filename": new_file_name,
-                        "old_filename": old_file_name,  # 这里你要从service里面拿到匹配到的旧文件名！
-                        "agent_suggest": f"""相似度判断：{agent_json["sim_desc"]}
-                        推荐操作：{agent_json["action"]}
-                        理由：{agent_json["reason"]}""",
-                        "pdf_base64": file_base_str
-                    }
-                else:
-                    st.error("智能体返回结果解析失败，请重试上传！")
+    name=file.name
+    type=file.type
+    size=file.size/1024
+    st.write(f"文件名{name},文件类型{type}，文件大小{size:.2f}KB")
+    # Streamlit 每次重跑都会带着上传组件里的文件再跑一遍脚本。
+    # 不拦一下的话，同一个文件会被反复解析、反复做 embedding（是要花钱的），
+    # 用户看到的现象就是"三个按钮一遍遍冒出来"。
+    # 用文件名+大小当指纹：处理过的直接跳过，换了文件指纹才变。
+    upload_key="%s|%d" % (file.name,file.size)
+    if st.session_state.get("handled_upload")==upload_key:
+        st.caption("这个文件本次已经处理过；要重新入库，先移除再重新选择")
+    else:
+        st.session_state["handled_upload"]=upload_key
+        with st.spinner("文件导入中"):
+            file_type=type[-3:]
+            if file_type=="pdf":
+                a=file.read()
+                # 走 base64 而不是字节流：后端接口统一收 base64 字符串，
+                # 同一份内容 base64 编码结果稳定，md5 才能当作文件指纹用
+                file_base_str=base64.b64encode(a).decode("utf-8")
+                # 返回值有三种形态，见 knolege.upload_str_pdf 的说明：
+                #   False → 完全重复；True → 已入库；dict → 有相似文档，等用户决定
+                result,old_file_name,new_file_name=st.session_state["service"].upload_str_pdf(file_base_str,filename=name)
+                if result is False:
+                    st.warning("该文件MD5已存在，完全重复，跳过本次上传")
                     st.session_state.pending_task = None
-        else:
-            # txt / csv 目前只读不解析入库，属于预留入口
-            text=file.getvalue().decode("utf-8")
-        time2=datetime.datetime.now()
-        all_time=(time2-time1).total_seconds()
-        st.write(all_time)
+                elif result is True:
+                    st.success("文档入库完成，无相似文档")
+                    st.session_state.pending_task = None
+                else:
+                    # 智能体的返回是一串消息，最后一条才是它写的内容
+                    aimsg = result["messages"][1]
+                    agent_raw_content = aimsg.content
+                    agent_json = parse_agent_json(agent_raw_content)
+                    # 组装 pending_task：这一步【没有入库】，只是把待确认的信息挂起来，
+                    # 真正的写入发生在下面按钮分支里。
+                    # pdf_base64 必须一起存：点按钮时可能已经过了几十秒，
+                    # 内存里那份解析结果未必还在，到时候要靠它重新入库。
+                    if agent_json is not None:
+                        st.session_state.pending_task = {
+                            "new_filename": new_file_name,
+                            "old_filename": old_file_name,
+                            "agent_suggest": f"""相似度判断：{agent_json["sim_desc"]}
+                            推荐操作：{agent_json["action"]}
+                            理由：{agent_json["reason"]}""",
+                            "pdf_base64": file_base_str
+                        }
+                    else:
+                        st.error("智能体返回结果解析失败，请重试上传！")
+                        st.session_state.pending_task = None
+            else:
+                # txt / csv 目前只读不解析入库，属于预留入口
+                text=file.getvalue().decode("utf-8")
+else:
+    # 文件被移除后要清掉指纹，否则重新选同一个文件会被误判成"已处理过"
+    st.session_state["handled_upload"]=None
 # ===================== 【重点！！顶格写，没有缩进！！】=====================
 # 这一段必须和上面的 if file is not None 平级。
 # 原因：用户点"覆盖"按钮时页面重跑，这一次 file 是空的（上传组件被重置），
@@ -342,22 +349,30 @@ if st.session_state.pending_task is not None:
         # 必须先删旧的再写新的：同名文件重传时块数可能变少，
         # 不删的话旧的高编号块会残留，变成"搜得到但内容已过期"的脏数据
         st.session_state["service"].delete_file(task["old_filename"])
-        st.session_state["service"].real_save_pdf(task["new_filename"])
-        st.success("操作完成：已覆盖旧文档，新文档入库成功！")
+        # 带上 base64 一起传：内存里那份解析结果未必还在，
+        # 没了就靠它重新解析入库，不再依赖"上传时的缓存还活着"这个前提
+        saved,_,_=st.session_state["service"].real_save_pdf(task["new_filename"],task["pdf_base64"])
         st.session_state.pending_task = None
-        st.rerun()
+        if saved is None:
+            st.error("待入库的解析结果已丢失，请重新上传这个文件")
+        else:
+            st.success("操作完成：已覆盖旧文档，新文档入库成功！")
+            st.rerun()
 
     if btn_both:
-        st.session_state["service"].real_save_pdf(task["new_filename"])
-        st.success("操作完成：新旧文档全部入库！")
+        saved,_,_=st.session_state["service"].real_save_pdf(task["new_filename"],task["pdf_base64"])
         st.session_state.pending_task = None
-        st.rerun()
+        if saved is None:
+            st.error("待入库的解析结果已丢失，请重新上传这个文件")
+        else:
+            st.success("操作完成：新旧文档全部入库！")
+            st.rerun()
 
     if btn_cancel:
         # 取消只是把挂起的任务扔掉，什么数据都没写过，所以不需要回滚任何东西
+        # 这里不 rerun：rerun 会把上面这句提示立刻冲掉，看起来像"点了没反应"
         st.warning("已取消，本次文件不会入库")
         st.session_state.pending_task = None
-        st.rerun()
 
 # ===================== 文档结构化结果查看（独立入口）=====================
 st.divider()

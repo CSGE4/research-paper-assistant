@@ -422,20 +422,33 @@ class Knolege:
         result,old_file_name,new_file_name=self._save_to_all_db(filename,data,page_embedding,str_hashlib)
         return result,old_file_name,new_file_name#(入库是否成功，旧的文件名，新的文件名)
 
-    def real_save_pdf(self,filename:str):#(在高相似度的情况下任然决定文档入库)
+    def real_save_pdf(self,filename:str,base64_str:str=None):#(在高相似度的情况下任然决定文档入库)
         """用户已经决定"覆盖"或"都留"之后，才真正写库。
 
-        用的还是 temp_pdf 里那份解析结果，所以不会重复解析、重复花钱做 embedding。
-        写完就把它清掉，避免同一个文件在内存里留两份。
+        优先用 temp_pdf 里那份解析结果，省一次解析和一次 embedding。
+        但 temp_pdf 是内存里的东西：页面重跑、会话重建、云端休眠唤醒都可能让它消失，
+        所以它只是"能省就省"的快路径，不是前提——拿不到就用 base64 重新解析一遍。
+
+        以前末尾直接 del，缓存一旦已经没了就抛 KeyError，用户点按钮当场崩，
+        界面上留着一排按钮，看着像"点了没反应"，实际是已经把解析结果弄丢了。
         """
-        cache=self.temp_pdf[filename]
-        data = cache["data"]
-        filename = cache["filename"]
-        md5_str = cache["md5"]
-        file_embedding=cache["file_embedding"]
-        result, old_file_name, new_file_name = self._save_to_all_db(filename, data, file_embedding, md5_str)
-        del self.temp_pdf[filename]
-        return result, old_file_name, new_file_name#(入库是否成功，旧的文件名，新的文件名)
+        cache=self.temp_pdf.pop(filename,None)
+        if cache is not None:
+            data=cache["data"]
+            filename=cache["filename"]
+            md5_str=cache["md5"]
+            file_embedding=cache["file_embedding"]
+        else:
+            # 快路径失效，退回慢路径：重新解析 + 重新嵌入，多花 30~90 秒，但不会丢
+            if not base64_str:
+                return None,None,filename
+            md5_str=get_str_md5(base64_str)
+            data=self._parse_pdf_base64(base64_str)
+            page_texts=[]
+            for i in data:
+                page_texts.append(i["text"])
+            file_embedding=self.embeddings.embed_documents(page_texts)
+        return self._save_to_all_db(filename,data,file_embedding,md5_str)
 
     def delete_file(self,filename:str):
         """删除embedding文件，summary文件，向量数据库，bm25模型,md5文件中的所属内容"""
