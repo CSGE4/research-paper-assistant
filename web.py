@@ -336,6 +336,9 @@ if st.session_state.pending_task is not None:
     st.divider()
     st.subheader("检测到相似文档，智能体给出分析建议")
     st.info(task["agent_suggest"])
+    # 点按钮后可能要走一次重新解析（内存里的缓存过期时），最长约一分钟。
+    # 提前说清楚，免得用户以为没反应又重传一遍，最后库里多出一份。
+    st.caption("点按钮后最多需要约 1 分钟，请不要刷新页面或重复上传")
 
     col1, col2, col3 = st.columns(3)
     with col1:
@@ -346,12 +349,18 @@ if st.session_state.pending_task is not None:
         btn_cancel = st.button("❌取消本次上传")
 
     if btn_overwrite:
-        # 必须先删旧的再写新的：同名文件重传时块数可能变少，
-        # 不删的话旧的高编号块会残留，变成"搜得到但内容已过期"的脏数据
-        st.session_state["service"].delete_file(task["old_filename"])
+        # 同名重传必须先删再写：块数可能变少，不删的话旧的高编号块会残留，
+        # 变成"搜得到但内容已过期"的脏数据。
+        # 不同名时反过来——先写新的、成功了再删旧的。
+        # 顺序反了的话，写新的这一步一旦失败或超时，旧的已经被删掉，两边都没了。
+        same_name=(task["old_filename"]==task["new_filename"])
+        if same_name:
+            st.session_state["service"].delete_file(task["old_filename"])
         # 带上 base64 一起传：内存里那份解析结果未必还在，
         # 没了就靠它重新解析入库，不再依赖"上传时的缓存还活着"这个前提
         saved,_,_=st.session_state["service"].real_save_pdf(task["new_filename"],task["pdf_base64"])
+        if saved is not None and not same_name:
+            st.session_state["service"].delete_file(task["old_filename"])
         st.session_state.pending_task = None
         if saved is None:
             st.error("待入库的解析结果已丢失，请重新上传这个文件")
