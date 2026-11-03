@@ -74,19 +74,49 @@ if question:
 
     # 2. 交给智能体，它自己决定调 local_search、translate_paper 还是 web_search
     with st.chat_message("assistant"):
-        with st.spinner("检索文献中…"):
-            cfg = {"configurable": {"thread_id": st.session_state["thread_id"]}}
+        cfg = {"configurable": {"thread_id": st.session_state["thread_id"]}}
+        # 边生成边显示。一次问答实测 18 秒左右，等全部生成完再上屏，
+        # 用户前 18 秒看到的是一个转圈，会以为卡死了。
+        # stream_mode="messages" 会把模型吐的每一小段即时抛出来。
+        placeholder = st.empty()
+        placeholder.info("检索文献中…")
+        answer = ""
+        for chunk, meta in get_agent().stream(
+            {"messages": [HumanMessage(question)]},
+            config=cfg,
+            # 开关从这里传进 agent：pick_prompt 读它决定用哪套提示词
+            context={"use_web": use_web},
+            stream_mode="messages",
+        ):
+            # 只收"最终作答"那一次模型的输出，其余三类都要挡掉：
+            #   选工具那一次也在 model 节点里，但 content 为空、只带 tool_call_chunks；
+            #   工具内部那次生成（rag.py 里的模型）跑在 tools 节点上，节点名对不上；
+            #   工具自己返回的文本不是模型输出，压根不会出现在这个消息流里。
+            if meta.get("langgraph_node") != "model":
+                continue
+            if getattr(chunk, "tool_call_chunks", None):
+                continue
+            piece = chunk.content
+            if not piece:
+                continue
+            if not isinstance(piece, str):
+                piece = str(piece)
+            answer = answer + piece
+            placeholder.markdown(answer + "▌")
+
+        # 兜底：万一流式的节点名或字段在当前版本里对不上，会一个字都收不到。
+        # 这时候退回整段调用——宁可慢一点，也不能给用户一个空回答。
+        if not answer:
             result = get_agent().invoke(
                 {"messages": [HumanMessage(question)]},
                 config=cfg,
-                # 开关从这里传进 agent：pick_prompt 读它决定用哪套提示词
                 context={"use_web": use_web},
             )
             answer = result["messages"][-1].content
             # 有的模型会把 content 返回成列表（分段内容），这里统一转成字符串
             if not isinstance(answer, str):
                 answer = str(answer)
-        st.markdown(answer)
+        placeholder.markdown(answer)
 
     # 3. 存进历史，页面重跑时还要画出来
     st.session_state["history"].append({"role": "assistant", "text": answer})

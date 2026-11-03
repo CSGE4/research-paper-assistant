@@ -21,6 +21,10 @@ class Rag:
             model="qwen3.8-max",
             base_url=os.getenv("qwen_url"),
             api_key=os.getenv("DASHSCOPE_API_KEY"),
+            # 和 agent.py 里那个模型保持一致：这一层是整条链路里最慢的一次生成
+            # （输入七八千字），卡住的时候同样是无限期干等，必须一起掐。
+            timeout=40,
+            max_retries=2,
         )
 
         # 提示词里那几条限制，每一条都是针对一个真实会犯的错：

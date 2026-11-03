@@ -63,6 +63,11 @@ model=ChatOpenAI(
     model="qwen3.8-max",
     base_url=os.getenv("qwen_url"),
     api_key=os.getenv("DASHSCOPE_API_KEY"),
+    # 实测同一个问题，同样的输入，有时 18 秒、有时 80 秒。
+    # 差别不在计算量，在某个请求卡住干等——单次调用只要 2.8 秒，能等出 80 秒只能是没响应。
+    # 40 秒足够覆盖正常最慢的一次（实测最长 11.1 秒），超时就掐掉重发，别让用户陪着等。
+    timeout=40,
+    max_retries=2,
 )
 agent=create_agent(
     model
