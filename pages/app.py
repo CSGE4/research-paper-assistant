@@ -5,6 +5,7 @@ web.py 里是「上传 → 入库 → 看结构化结果」这一条流程，问
 Streamlit 会自动在侧边栏生成页面入口
 """
 
+import json
 import uuid
 
 import streamlit as st
@@ -79,44 +80,83 @@ if question:
         # 用户前 18 秒看到的是一个转圈，会以为卡死了。
         # stream_mode="messages" 会把模型吐的每一小段即时抛出来。
         placeholder = st.empty()
-        placeholder.info("检索文献中…")
+        # 这句提示必须跟着流程往下换。实测「作者是谁」十几秒就完，
+        # 但「超参数是多少」这种要查表的问题，模型会换几次关键词重查，
+        # 能跑到一分钟以上——全程只写「检索文献中…」的话，用户看到的就是卡死。
+        placeholder.info("正在检索文献库…")
         answer = ""
-        for chunk, meta in get_agent().stream(
-            {"messages": [HumanMessage(question)]},
-            config=cfg,
-            # 开关从这里传进 agent：pick_prompt 读它决定用哪套提示词
-            context={"use_web": use_web},
-            stream_mode="messages",
-        ):
-            # 只收"最终作答"那一次模型的输出，其余三类都要挡掉：
-            #   选工具那一次也在 model 节点里，但 content 为空、只带 tool_call_chunks；
-            #   工具内部那次生成（rag.py 里的模型）跑在 tools 节点上，节点名对不上；
-            #   工具自己返回的文本不是模型输出，压根不会出现在这个消息流里。
-            if meta.get("langgraph_node") != "model":
-                continue
-            if getattr(chunk, "tool_call_chunks", None):
-                continue
-            piece = chunk.content
-            if not piece:
-                continue
-            if not isinstance(piece, str):
-                piece = str(piece)
-            answer = answer + piece
-            placeholder.markdown(answer + "▌")
+        tag_args = ""      # 攒模型吐出来的工具参数（一串 JSON 碎片）
+        pending = False    # 模型刚点完工具、还没进工具节点
+        failed = None
 
-        # 兜底：万一流式的节点名或字段在当前版本里对不上，会一个字都收不到。
-        # 这时候退回整段调用——宁可慢一点，也不能给用户一个空回答。
-        if not answer:
-            result = get_agent().invoke(
+        try:
+            for chunk, meta in get_agent().stream(
                 {"messages": [HumanMessage(question)]},
                 config=cfg,
+                # 开关从这里传进 agent：pick_prompt 读它决定用哪套提示词
                 context={"use_web": use_web},
-            )
-            answer = result["messages"][-1].content
-            # 有的模型会把 content 返回成列表（分段内容），这里统一转成字符串
-            if not isinstance(answer, str):
-                answer = str(answer)
-        placeholder.markdown(answer)
+                stream_mode="messages",
+            ):
+                node = meta.get("langgraph_node")
+                # 工具节点在跑：检索在这里，rag.py 里那次内部生成也在这里。
+                # 第一次收到就换文案——说明检索已经有结果，模型正在读资料。
+                if node != "model":
+                    if pending:
+                        pending = False
+                        # 这一轮的参数已经用掉了，清空，否则第二次检索的关键词
+                        # 会和第一次拼成一串，JSON 解析必然失败
+                        tag_args = ""
+                        placeholder.info("已检索到资料，正在组织回答…")
+                    continue
+
+                # 下面都是 model 节点。选工具那一次也在 model 节点里，
+                # 但 content 为空、只带 tool_call_chunks，要单独处理。
+                if getattr(chunk, "tool_call_chunks", None):
+                    # 参数是一个字一个字吐出来的 JSON 碎片，攒齐了才解析得动。
+                    # 解析成功就把检索关键词显示出来，让用户知道在查什么。
+                    for tc in chunk.tool_call_chunks:
+                        tag_args = tag_args + (tc.get("args") or "")
+                    if tag_args:
+                        pending = True
+                        try:
+                            q = json.loads(tag_args).get("query")
+                        except Exception:
+                            q = None
+                        if q:
+                            placeholder.info("正在检索：%s" % q)
+                    continue
+
+                piece = chunk.content
+                if not piece:
+                    continue
+                if not isinstance(piece, str):
+                    piece = str(piece)
+                answer = answer + piece
+                placeholder.markdown(answer + "▌")
+
+            # 兜底：万一流式的节点名或字段在当前版本里对不上，会一个字都收不到。
+            # 只在「没抛异常但空手而归」时走这条路；异常不走，否则一次失败
+            # 要把整条链再付一遍，耗时翻倍。
+            if not answer:
+                result = get_agent().invoke(
+                    {"messages": [HumanMessage(question)]},
+                    config=cfg,
+                    context={"use_web": use_web},
+                )
+                answer = result["messages"][-1].content
+                # 有的模型会把 content 返回成列表（分段内容），这里统一转成字符串
+                if not isinstance(answer, str):
+                    answer = str(answer)
+        except Exception as e:
+            # 原来这里没有 try/except：异常直接变成页面上一片红字，而且
+            # 会话历史里只留下一个没人回答的提问。下一轮模型看到这个空档，
+            # 就会自己编一个「我查过了但没拿到返回」的理由（真发生过）。
+            failed = e
+            answer = "这一轮没有跑完（%s）。这不是查不到，是没跑完，请再问一次。" % type(e).__name__
+            placeholder.error(answer)
+
+        if failed is None:
+            placeholder.markdown(answer)
 
     # 3. 存进历史，页面重跑时还要画出来
     st.session_state["history"].append({"role": "assistant", "text": answer})

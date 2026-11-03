@@ -23,8 +23,9 @@ class Rag:
             api_key=os.getenv("DASHSCOPE_API_KEY"),
             # 和 agent.py 里那个模型保持一致：这一层是整条链路里最慢的一次生成
             # （输入七八千字），卡住的时候同样是无限期干等，必须一起掐。
-            timeout=40,
-            max_retries=2,
+            # 重试 0 次同理：这里再重试两遍，一次问答就会变成好几分钟。
+            timeout=45,
+            max_retries=0,
         )
 
         # 提示词里那几条限制，每一条都是针对一个真实会犯的错：
