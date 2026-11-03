@@ -28,7 +28,7 @@
 #   {"version": 1,
 #    "documents": {
 #        "1706.03762v1.pdf": {
-#            "source": "1706.03762v1.pdf", "model": "qwen3.8-max",
+#            "source": "1706.03762v1.pdf", "model": "qwen3.8-flash",
 #            "sections": {
 #                "Abstract": {"page": 1, "zh": "占主导地位的序列转换模型..."}}}}}
 #
@@ -44,7 +44,7 @@ from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
 import config
 load_dotenv()
-MODEL = "qwen3.8-max"
+MODEL = "qwen3.8-flash"
 PROMPT_VERSION = "v1"          # 改 prompt 就加一，缓存自动失效
 CACHE_PATH = config.CACHE_PATH    # 缓存：翻译过的段落不必再花钱
 RESULT_PATH = config.RESULT_PATH

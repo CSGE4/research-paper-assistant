@@ -19,7 +19,7 @@ model_extractor.py —— 用大模型补规则解析的缺口。
 
 开关：
     MODEL_EXTRACT_ENABLED=0     关闭模型补全（只用规则）
-    MODEL_EXTRACT_MODELS=a,b    模型链，按顺序尝试，默认 qwen3.8-max,deepseek-chat
+    MODEL_EXTRACT_MODELS=a,b    模型链，按顺序尝试，默认 qwen3.8-flash,deepseek-chat
 """
 
 import json
@@ -40,8 +40,8 @@ load_dotenv()
 # 模型兜底负责的字段（其余字段规则更可靠，不动）
 MODEL_FIELDS = ("title", "authors", "keywords")
 
-# 默认模型链：先 DashScope 的 qwen3.8-max，失败退到 DeepSeek
-DEFAULT_CHAIN = ("qwen3.8-max", "deepseek-chat")
+# 默认模型链：先 DashScope 的 qwen3.8-flash，失败退到 DeepSeek
+DEFAULT_CHAIN = ("qwen3.8-flash", "deepseek-chat")
 
 # 送进模型的正文字符上限（防止 prompt 过长 / 费用失控）
 MAX_CONTEXT_CHARS = 6000

@@ -13,7 +13,7 @@ class tree:
         # self.extractor.get_designate("xxx.pdf") -> 指定文件名
 
         self.model=ChatOpenAI(
-            model="qwen3.8-max",
+            model="qwen3.8-flash",
             base_url=os.getenv("qwen_url"),
             api_key=os.getenv("DASHSCOPE_API_KEY")
         )

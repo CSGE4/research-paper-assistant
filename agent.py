@@ -65,7 +65,7 @@ system_prompt = """你是科研文献助手，只依据本地已入库的文献�
    用户问你刚才为什么没答上来，就说「上一轮没有完成」，不要编造原因。
 """
 model=ChatOpenAI(
-    model="qwen3.8-max",
+    model="qwen3.8-flash",
     base_url=os.getenv("qwen_url"),
     api_key=os.getenv("DASHSCOPE_API_KEY"),
     # 实测同一个问题、同样的输入，有时 18 秒、有时 80 秒。

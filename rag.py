@@ -18,7 +18,7 @@ class Rag:
         self.vector_story=vctor_story_search()
 
         self.model=ChatOpenAI(
-            model="qwen3.8-max",
+            model="qwen3.8-flash",
             base_url=os.getenv("qwen_url"),
             api_key=os.getenv("DASHSCOPE_API_KEY"),
             # 和 agent.py 里那个模型保持一致：这一层是整条链路里最慢的一次生成
