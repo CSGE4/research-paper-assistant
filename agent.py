@@ -14,6 +14,7 @@ load_dotenv()
 from langchain_openai import ChatOpenAI
 import os
 from tool_3 import local_search
+from tool_4 import list_documents
 
 connection=sqlite3.connect(config.sqlite_path,check_same_thread=False)
 checkpoint=SqliteSaver(connection)#自动存储数据和会话
@@ -24,6 +25,7 @@ system_prompt = """你是科研文献助手，只依据本地已入库的文献�
 【可用工具】
 1. local_search    —— 查本地文献库。回答「论文里说了什么」「某个数字是多少」「为什么这样做」这类内容问题。
 2. translate_paper —— 把本地文献按章节翻译成中文。只在用户明确要「译文」时使用。
+3. list_documents  —— 列出库里有哪些文献（文件名、标题、页数）。不花检索次数。
 
 【第一步：判断意图，只选一个工具】
 判断标准是用户想拿到什么：
@@ -32,6 +34,10 @@ system_prompt = """你是科研文献助手，只依据本地已入库的文献�
 
 注意：「这段什么意思」「这篇讲了什么」「结论是什么」都是问内容，走 local_search，不要走翻译。
 只有出现「翻译」「译成中文」「中文版」这类明确要求，才走 translate_paper。
+
+遇到「这几篇」「所有文献」「分别」「各有什么」这种要覆盖多篇的说法，
+或者你并不知道库里有哪几篇时，先调一次 list_documents 拿到文件名和标题，
+再用文件名或标题里的关键词去检索，不要靠猜关键词，猜偏一次就白花十几秒。
 
 【translate_paper 规则】
 1. 一次只翻一节。section 传节标题，如 "Abstract"、"Conclusion"，不要留空。
@@ -58,9 +64,9 @@ system_prompt = """你是科研文献助手，只依据本地已入库的文献�
    不能据此推断论文的发表时间，也不能把编号里的数字当成论文内容。
 7. 不要做推断。原文没有用一句话直接说明的事实，就回答「库中没有明确说明」，
    不要用常识补全，也不要从参考文献条目的年份推断本文的信息。
-8. 同一轮最多调用 local_search 两次。第一次的原文不完整，可以换一组关键词再查一次；
-   还凑不齐，就基于已查到的内容回答，答不了就说「库中没有相关资料」。
-   不要一条一条换词硬找——每多查一次就是十几秒，用户会在页面上干等到以为卡死。
+8. 同一轮最多调用 local_search 6 次。要覆盖多篇文献时，把每次查询写得具体
+   （例如「CLIP 的训练目标是什么」），一次问清，不要换着关键词反复试同一篇。
+   6 次还没凑齐，就用已查到的内容作答，并说明哪几篇没有查到。
 9. 不要解释你自己的检索过程。你看不到检索日志，说不出调了几次工具、换了哪些关键词。
    用户问你刚才为什么没答上来，就说「上一轮没有完成」，不要编造原因。
 """
@@ -76,6 +82,10 @@ model=ChatOpenAI(
     # 卡住就让它快速失败，用户宁可看到一句报错，也不要看着转圈干等。
     timeout=45,
     max_retries=0,
+    # qwen3.8 这一代默认带"思考"。实测同一段输入：82 秒里 4410 个输出 token，
+    # 其中 4103 个是思考，正文只有 678 字。关掉之后 8.8 秒，正文反而 948 字。
+    # 这里要的是照着检索到的原文复述，不需要它自己想，思考纯粹是烧钱拖时间。
+    extra_body={"enable_thinking": False},
 )
 agent=create_agent(
     model
@@ -138,7 +148,7 @@ def pick_prompt(request) -> str:
 
 main_agent=create_agent(
     model,
-    tools=[local_search,translate_paper,web_search],
+    tools=[local_search,translate_paper,web_search,list_documents],
     middleware=[pick_prompt],
     checkpointer=checkpoint,
 )
