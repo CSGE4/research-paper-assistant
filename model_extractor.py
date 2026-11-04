@@ -70,7 +70,9 @@ def build_model(name=None, temperature=0, timeout=90):
     name = name or _model_chain()[0]
     base_url, api_key = _provider_conf(name)
     return ChatOpenAI(model=name, base_url=base_url, api_key=api_key,
-                      temperature=temperature, timeout=timeout, max_retries=1)
+                      temperature=temperature, timeout=timeout, max_retries=1,
+                      # 只做"从原文里挑出标题/作者"，不需要推理
+                      extra_body={"enable_thinking": False})
 
 
 # ---------------------------------------------------------------- 缺口识别

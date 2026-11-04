@@ -15,7 +15,9 @@ class tree:
         self.model=ChatOpenAI(
             model="qwen3.8-flash",
             base_url=os.getenv("qwen_url"),
-            api_key=os.getenv("DASHSCOPE_API_KEY")
+            api_key=os.getenv("DASHSCOPE_API_KEY"),
+            # 只让模型吐一段 JSON，不需要它推理
+            extra_body={"enable_thinking": False},
         )
 
         self.promote="""任务：从下面文本中提取实体以及实体之间的关系。

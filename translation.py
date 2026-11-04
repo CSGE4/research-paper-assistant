@@ -82,6 +82,8 @@ class Translator(object):
             base_url=os.getenv("qwen_url"),
             api_key=os.getenv("DASHSCOPE_API_KEY"),
             temperature=0.2,        # 翻译要的是稳，不是活，所以压低
+            # 翻译是逐句照搬，开着思考只会多等几十秒、多付思考 token
+            extra_body={"enable_thinking": False},
         )
         self.system = SYSTEM_PROMPT.replace("{glossary}", GLOSSARY)
         self._load_cache()
