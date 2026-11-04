@@ -79,12 +79,18 @@ if question:
         # 边生成边显示。一次问答实测 18 秒左右，等全部生成完再上屏，
         # 用户前 18 秒看到的是一个转圈，会以为卡死了。
         # stream_mode="messages" 会把模型吐的每一小段即时抛出来。
+        # 必须按这个顺序建：灰字那行在回答上面
+        # 多轮检索时模型每轮都先说一句「让我先查一下」，这些过渡语原来会被拼进
+        # 最终回答里，用户看到的是「我需要先了解…让我逐篇检索…」再接一段正经答案。
+        # 这里把它们拎到上面一行灰色小字里，只留最近几条。
+        log_box = st.empty()
         placeholder = st.empty()
         # 这句提示必须跟着流程往下换。实测「作者是谁」十几秒就完，
         # 但「超参数是多少」这种要查表的问题，模型会换几次关键词重查，
         # 能跑到一分钟以上——全程只写「检索文献中…」的话，用户看到的就是卡死。
         placeholder.info("正在检索文献库…")
         answer = ""
+        log = []           # 前面几轮的过渡语
         tag_args = ""      # 攒模型吐出来的工具参数（一串 JSON 碎片）
         pending = False    # 模型刚点完工具、还没进工具节点
         failed = None
@@ -112,6 +118,13 @@ if question:
                 # 下面都是 model 节点。选工具那一次也在 model 节点里，
                 # 但 content 为空、只带 tool_call_chunks，要单独处理。
                 if getattr(chunk, "tool_call_chunks", None):
+                    # 走到这里说明这一轮是在点工具，它刚才吐的正文只是过渡语。
+                    # 挪到灰字区，把主区域清空，去等真正的答案。
+                    if answer.strip():
+                        log.append(answer.strip())
+                        del log[:-4]          # 只留最近四条，别把版面撑长
+                        log_box.caption(" · ".join(log))
+                        answer = ""
                     # 参数是一个字一个字吐出来的 JSON 碎片，攒齐了才解析得动。
                     # 解析成功就把检索关键词显示出来，让用户知道在查什么。
                     for tc in chunk.tool_call_chunks:
