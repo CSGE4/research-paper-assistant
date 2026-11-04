@@ -6,6 +6,7 @@ Streamlit 会自动在侧边栏生成页面入口
 """
 
 import json
+import time
 import uuid
 
 import streamlit as st
@@ -89,11 +90,13 @@ if question:
         # 但「超参数是多少」这种要查表的问题，模型会换几次关键词重查，
         # 能跑到一分钟以上——全程只写「检索文献中…」的话，用户看到的就是卡死。
         placeholder.info("正在检索文献库…")
+        t_start = time.time()
         answer = ""
         log = []           # 前面几轮的过渡语
         tag_args = ""      # 攒模型吐出来的工具参数（一串 JSON 碎片）
         pending = False    # 模型刚点完工具、还没进工具节点
         failed = None
+        query_done = []    # 已经检索过的关键词，用来数检索了几次
 
         try:
             for chunk, meta in get_agent().stream(
@@ -119,12 +122,15 @@ if question:
                 # 但 content 为空、只带 tool_call_chunks，要单独处理。
                 if getattr(chunk, "tool_call_chunks", None):
                     # 走到这里说明这一轮是在点工具，它刚才吐的正文只是过渡语。
-                    # 挪到灰字区，把主区域清空，去等真正的答案。
+                    # 挪到灰字区，主区域立刻补一句提示——
+                    # 只清空 answer 变量是没用的，屏幕上的字还在；而下一段
+                    # 碎片如果是个换行，就会渲染出一个孤零零的 ▌，看起来像白板。
                     if answer.strip():
                         log.append(answer.strip())
                         del log[:-4]          # 只留最近四条，别把版面撑长
                         log_box.caption(" · ".join(log))
                         answer = ""
+                        placeholder.info("正在继续检索…")
                     # 参数是一个字一个字吐出来的 JSON 碎片，攒齐了才解析得动。
                     # 解析成功就把检索关键词显示出来，让用户知道在查什么。
                     for tc in chunk.tool_call_chunks:
@@ -137,6 +143,9 @@ if question:
                             q = None
                         if q:
                             placeholder.info("正在检索：%s" % q)
+                            # 同一个词反复解析成功只算一次检索
+                            if q not in query_done:
+                                query_done.append(q)
                     continue
 
                 piece = chunk.content
@@ -145,7 +154,10 @@ if question:
                 if not isinstance(piece, str):
                     piece = str(piece)
                 answer = answer + piece
-                placeholder.markdown(answer + "▌")
+                # 只有真有内容才画。全是空白字符的话画出来就是一个孤零零的光标，
+                # 用户会以为回答没了。
+                if answer.strip():
+                    placeholder.markdown(answer + "▌")
 
             # 兜底：万一流式的节点名或字段在当前版本里对不上，会一个字都收不到。
             # 只在「没抛异常但空手而归」时走这条路；异常不走，否则一次失败
@@ -169,7 +181,15 @@ if question:
             placeholder.error(answer)
 
         if failed is None:
-            placeholder.markdown(answer)
+            if answer.strip():
+                placeholder.markdown(answer)
+            else:
+                # 一个字都没收到就是没答出来，别把空字符串刷上屏变成白板
+                answer = "这一轮没有拿到回答，请再问一次。"
+                placeholder.warning(answer)
+
+        # 检索几次、花了多久。平时是给用户一个交代，出问题时是唯一能从界面上看到的线索。
+        st.caption("共检索 %d 次，用时 %.0f 秒" % (len(query_done), time.time() - t_start))
 
     # 3. 存进历史，页面重跑时还要画出来
     st.session_state["history"].append({"role": "assistant", "text": answer})
