@@ -180,6 +180,14 @@ if question:
             answer = "这一轮没有跑完（%s）。这不是查不到，是没跑完，请再问一次。" % type(e).__name__
             placeholder.error(answer)
 
+        # 检索次数到上限时，中间件直接用一句英文内部提示结束了这一轮
+        # （"'local_search' tool call limit reached: run limit exceeded"），
+        # 那句话会当成最终回答刷到屏幕上。换成用户读得懂的一句。
+        if answer and "tool call limit reached" in answer.lower():
+            from tool_3 import MAX_RETRIEVAL
+            answer = ("这一轮的检索次数到了上限（%d 次），已经停下来。"
+                      "可以把问题问得更具体一点，或者分几次问。" % MAX_RETRIEVAL)
+
         if failed is None:
             if answer.strip():
                 placeholder.markdown(answer)

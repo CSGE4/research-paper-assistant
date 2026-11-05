@@ -16,7 +16,7 @@ from tool_2 import *
 load_dotenv()
 from langchain_openai import ChatOpenAI
 import os
-from tool_3 import local_search
+from tool_3 import local_search, over_budget, MAX_RETRIEVAL
 from tool_4 import list_documents
 
 connection=sqlite3.connect(config.sqlite_path,check_same_thread=False)
@@ -67,7 +67,8 @@ system_prompt = """你是科研文献助手，只依据本地已入库的文献�
    不能据此推断论文的发表时间，也不能把编号里的数字当成论文内容。
 7. 不要做推断。原文没有用一句话直接说明的事实，就回答「库中没有明确说明」，
    不要用常识补全，也不要从参考文献条目的年份推断本文的信息。
-8. 同一轮最多调用 local_search 6 次。要覆盖多篇文献时，把每次查询写得具体
+8. 同一轮最多调用 local_search 6 次，超出会被工具直接拒绝——这是硬约束，不是建议。
+   要覆盖多篇文献时，把每次查询写得具体
    （例如「CLIP 的训练目标是什么」），一次问清，不要换着关键词反复试同一篇。
    6 次还没凑齐，就用已查到的内容作答，并说明哪几篇没有查到。
 9. 不要解释你自己的检索过程。你看不到检索日志，说不出调了几次工具、换了哪些关键词。
@@ -113,6 +114,10 @@ def web_search(query: str, runtime: ToolRuntime):
     if not use_web:
         return ("联网搜索未开启（用户没有打开联网开关）。不要用你自己的知识回答，"
                 "直接回答「库中没有相关资料」。")
+    # 联网也占检索额度。不限制的话它一样能一轮搜二十几次（真发生过）。
+    stop = over_budget(runtime)
+    if stop:
+        return stop
     tv = search_tools()
     if tv is None:
         return "联网搜索未开启（没有配置 TAVILY_API_KEY），只能依据本地检索结果作答。"
@@ -146,7 +151,7 @@ WEB_RULES = """
 
 # 一个智能体，两套提示词。联网的值从本次调用传进来（app.py 里 invoke 的 context 参数），
 # 所以同一个 agent 对象能同时服务联网和不联网两种会话，不用建两个。
-from langchain.agents.middleware import dynamic_prompt
+from langchain.agents.middleware import dynamic_prompt, ToolCallLimitMiddleware
 #导入dynamic_prompt装饰器，动态监测智能体状态，并根据当前状态切换提示词
 """
 我--中间件--模型--工具--中间件--模型（此时回答）
@@ -161,10 +166,26 @@ def pick_prompt(request) -> str:
         return system_prompt + WEB_RULES
     return system_prompt
 
+# 检索次数的硬上限，分两层，各管一件事：
+#
+# 1) 这个中间件管「停下来」。同一轮第 7 次调用 local_search 时直接结束这一轮，
+#    而不是把拒绝文本丢回去。实测只回绝文本的话，模型会把拒绝当临时故障继续
+#    重试：上限设成 2 时，2 次正常检索之后它又连调了 13 次被拒的调用，白烧 57 秒。
+#    也试过在模型请求里摘掉工具、加 tool_choice="none"——日志确认工具确实摘掉了，
+#    但这家 provider 照样往一个不存在的工具上发调用，挡不住，所以换成这个官方中间件。
+#
+# 2) 工具内部的 over_budget 管「查不了」。它按本地+联网合计计数，
+#    是真正不让检索发生的那一道，中间件只是让过程早点结束。
+limit_search = ToolCallLimitMiddleware(
+    tool_name="local_search",
+    run_limit=MAX_RETRIEVAL,      # 按「一轮」算，不是按会话
+    exit_behavior="end",
+)
+
 main_agent=create_agent(
     model,
     tools=[local_search,translate_paper,web_search,list_documents],
-    middleware=[pick_prompt],
+    middleware=[pick_prompt, limit_search],
     checkpointer=checkpoint,
 )
 if __name__=="__main__":
