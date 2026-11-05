@@ -184,7 +184,7 @@ if question:
         # （"'local_search' tool call limit reached: run limit exceeded"），
         # 那句话会当成最终回答刷到屏幕上。换成用户读得懂的一句。
         if answer and "tool call limit reached" in answer.lower():
-            from tool_3 import MAX_RETRIEVAL
+            from search_budget import MAX_RETRIEVAL
             answer = ("这一轮的检索次数到了上限（%d 次），已经停下来。"
                       "可以把问题问得更具体一点，或者分几次问。" % MAX_RETRIEVAL)
 

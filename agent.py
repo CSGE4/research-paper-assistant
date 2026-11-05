@@ -3,9 +3,6 @@
 若果想让智能体进行联网，只需要将工具too_2的函数放入智能体工具列表，斌且修改提示词即可。
 """
 from langchain.agents import create_agent
-# ToolRuntime 是工具函数的隐藏参数：模型看不到它，但工具能读到本次调用的 context，
-# 联网开关就是从这里拿的。
-from langgraph.prebuilt import ToolRuntime
 from dotenv import load_dotenv
 from langchain.messages import HumanMessage
 from langgraph.checkpoint.sqlite import SqliteSaver
@@ -16,7 +13,8 @@ from tool_2 import *
 load_dotenv()
 from langchain_openai import ChatOpenAI
 import os
-from tool_3 import local_search, over_budget, MAX_RETRIEVAL
+from tool_3 import local_search
+from search_budget import over_budget, MAX_RETRIEVAL
 from tool_4 import list_documents
 
 connection=sqlite3.connect(config.sqlite_path,check_same_thread=False)
@@ -94,46 +92,6 @@ model=ChatOpenAI(
 agent=create_agent(
     model
 )
-
-# 联网工具只是包一层：没配 TAVILY_API_KEY 时返回一句话让模型退回去用本地检索，
-# 而不是让整个问答页报错。返回拼好的纯文本，模型只认文本。
-#
-# 开关必须在工具内部再核一遍。web_search 一直挂在工具列表里（见下面的 main_agent），
-# switch 关掉只是换了提示词——模型看到的 schema 没变，遇到库里没有的问题照样会调。
-# 本地 .env 里有 tavily_api_key，Windows 查环境变量不区分大小写，所以这台机器上是通的；
-# 线上反而因为缺大写的 TAVILY_API_KEY 而调不动。结果是这个缺陷只在本机出现，
-# 而本机正是录演示视频的地方：界面写着「仅本地文献库」，回答却来自互联网。
-def web_search(query: str, runtime: ToolRuntime):
-    """联网检索公开资料。只有本地文献库确实查不到相关内容时才使用。
-        Args:
-            query: 要在互联网上检索的关键词或问题
-        """
-    use_web = False
-    if runtime.context:
-        use_web = runtime.context.get("use_web", False)
-    if not use_web:
-        return ("联网搜索未开启（用户没有打开联网开关）。不要用你自己的知识回答，"
-                "直接回答「库中没有相关资料」。")
-    # 联网也占检索额度。不限制的话它一样能一轮搜二十几次（真发生过）。
-    stop = over_budget(runtime)
-    if stop:
-        return stop
-    tv = search_tools()
-    if tv is None:
-        return "联网搜索未开启（没有配置 TAVILY_API_KEY），只能依据本地检索结果作答。"
-    data = tv.invoke({"query": query})
-    items = []
-    if isinstance(data, dict):
-        items = data.get("results", [])
-    if not items:
-        return "联网搜索没有返回结果。"
-    lines = []
-    for i, it in enumerate(items, 1):
-        content = it.get("content", "")
-        if len(content) > 300:
-            content = content[:300] + "…"
-        lines.append("%d. %s\n%s\n%s" % (i, it.get("title", ""), it.get("url", ""), content))
-    return "\n\n".join(lines)
 
 # 联网时才追加的规则。必须显式覆盖前面「查不到就说库中没有相关资料」那条，
 # 否则开关打开了，模型也只会继续回答"库中没有"，联网等于没开。
