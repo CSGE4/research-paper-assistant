@@ -12,6 +12,10 @@ import uuid
 import streamlit as st
 from langchain.messages import HumanMessage
 
+# 检索次数的口径必须和 agent 那边一致，所以常量、工具名单、拒绝文本的判定
+# 全部从 search_budget 取，不在这里另写一份。
+from search_budget import MAX_RETRIEVAL, SEARCH_TOOL_NAMES, is_refusal
+
 
 @st.cache_resource
 def get_agent():
@@ -42,7 +46,7 @@ with st.sidebar:
     st.caption("当前会话：" + st.session_state["thread_id"])
 
     # 联网开关，默认关。关着的时候提示词里没有联网那段规则；
-    # 打开之后这同一个智能体会拿到 system_prompt + WEB_RULES（见 agent.py）
+    # 打开之后这同一个智能体会拿到 main_prompt + web_prompt（见 promot.py）
     use_web = st.toggle(
         "联网搜索",
         value=False,
@@ -96,7 +100,10 @@ if question:
         tag_args = ""      # 攒模型吐出来的工具参数（一串 JSON 碎片）
         pending = False    # 模型刚点完工具、还没进工具节点
         failed = None
-        query_done = []    # 已经检索过的关键词，用来数检索了几次
+        # 真正执行的检索次数。以前是数模型点了几次工具（见下面 tool_call_chunks 那段），
+        # 被拒的尝试也算，于是界面显示 16 次、实际只查了 6 次。
+        # 现在改成数工具返回：工具节点每返回一次结果才 +1，拒绝文本不算。
+        n_search = 0
 
         try:
             for chunk, meta in get_agent().stream(
@@ -116,6 +123,15 @@ if question:
                         # 会和第一次拼成一串，JSON 解析必然失败
                         tag_args = ""
                         placeholder.info("已检索到资料，正在组织回答…")
+                    # 只有真正查过的才计数。到上限后模型还会点几次工具，
+                    # 那几次返回的是拒绝文本，不该算进「检索了几次」里。
+                    tool_name = getattr(chunk, "name", "") or ""
+                    if tool_name in SEARCH_TOOL_NAMES:
+                        tool_text = chunk.content
+                        if not isinstance(tool_text, str):
+                            tool_text = str(tool_text or "")
+                        if not is_refusal(tool_text):
+                            n_search = n_search + 1
                     continue
 
                 # 下面都是 model 节点。选工具那一次也在 model 节点里，
@@ -143,9 +159,6 @@ if question:
                             q = None
                         if q:
                             placeholder.info("正在检索：%s" % q)
-                            # 同一个词反复解析成功只算一次检索
-                            if q not in query_done:
-                                query_done.append(q)
                     continue
 
                 piece = chunk.content
@@ -177,14 +190,22 @@ if question:
             # 会话历史里只留下一个没人回答的提问。下一轮模型看到这个空档，
             # 就会自己编一个「我查过了但没拿到返回」的理由（真发生过）。
             failed = e
-            answer = "这一轮没有跑完（%s）。这不是查不到，是没跑完，请再问一次。" % type(e).__name__
-            placeholder.error(answer)
+            if isinstance(e, NotImplementedError):
+                # 中间件要结束这一轮时，如果模型一口气点了个以上的工具，它只能用
+                # NotImplementedError 报出来。那不是真出错，就是撞上限了。
+                answer = ("这一轮的检索次数到了上限（%d 次），已经停下来。"
+                          "可以把问题问得更具体一点，或者分几次问。" % MAX_RETRIEVAL)
+                placeholder.warning(answer)
+            else:
+                answer = "这一轮没有跑完（%s）。这不是查不到，是没跑完，请再问一次。" % type(e).__name__
+                placeholder.error(answer)
 
-        # 检索次数到上限时，中间件直接用一句英文内部提示结束了这一轮
-        # （"'local_search' tool call limit reached: run limit exceeded"），
-        # 那句话会当成最终回答刷到屏幕上。换成用户读得懂的一句。
-        if answer and "tool call limit reached" in answer.lower():
-            from search_budget import MAX_RETRIEVAL
+        # 检索次数到上限时，中间件会用它自己的内部提示结束这一轮，那句话可能被
+        # 当成最终回答刷到屏幕上。它有两种写法，都要认：
+        #   结束语："'web_search' tool call limit reached: run limit exceeded (2/1 calls)"
+        #   塞给模型的："Tool call limit exceeded. Do not call 'web_search' again."
+        # 所以只匹配两者共有的 "tool call limit"。
+        if answer and "tool call limit" in answer.lower():
             answer = ("这一轮的检索次数到了上限（%d 次），已经停下来。"
                       "可以把问题问得更具体一点，或者分几次问。" % MAX_RETRIEVAL)
 
@@ -197,7 +218,8 @@ if question:
                 placeholder.warning(answer)
 
         # 检索几次、花了多久。平时是给用户一个交代，出问题时是唯一能从界面上看到的线索。
-        st.caption("共检索 %d 次，用时 %.0f 秒" % (len(query_done), time.time() - t_start))
+        # 数的是真正执行的检索，不是模型点了几次工具——两者在撞上限时会差出十几次。
+        st.caption("共检索 %d 次，用时 %.0f 秒" % (n_search, time.time() - t_start))
 
     # 3. 存进历史，页面重跑时还要画出来
     st.session_state["history"].append({"role": "assistant", "text": answer})

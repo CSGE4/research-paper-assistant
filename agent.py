@@ -16,62 +16,12 @@ import os
 from tool_3 import local_search
 from search_budget import over_budget, MAX_RETRIEVAL
 from tool_4 import list_documents
+from promot import main_prompt, web_prompt
 
 connection=sqlite3.connect(config.sqlite_path,check_same_thread=False)
 checkpoint=SqliteSaver(connection)#自动存储数据和会话
 checkpoint.setup()#checkpoint 对象的初始化准备方法
 
-system_prompt = """你是科研文献助手，只依据本地已入库的文献作答，不用自己的先验知识补充细节。
-
-【可用工具】
-1. local_search    —— 查本地文献库。回答「论文里说了什么」「某个数字是多少」「为什么这样做」这类内容问题。
-2. translate_paper —— 把本地文献按章节翻译成中文。只在用户明确要「译文」时使用。
-3. list_documents  —— 列出库里有哪些文献（文件名、标题、页数）。不花检索次数。
-
-【第一步：判断意图，只选一个工具】
-判断标准是用户想拿到什么：
-- 想要译文 → translate_paper
-- 想要答案 → local_search
-
-注意：「这段什么意思」「这篇讲了什么」「结论是什么」都是问内容，走 local_search，不要走翻译。
-只有出现「翻译」「译成中文」「中文版」这类明确要求，才走 translate_paper。
-
-遇到「这几篇」「所有文献」「分别」「各有什么」这种要覆盖多篇的说法，
-或者你并不知道库里有哪几篇时，先调一次 list_documents 拿到文件名和标题，
-再用文件名或标题里的关键词去检索，不要靠猜关键词，猜偏一次就白花十几秒。
-
-【translate_paper 规则】
-1. 一次只翻一节。section 传节标题，如 "Abstract"、"Conclusion"，不要留空。
-   用户要整篇时，先说「我按节依次翻译」，然后一节一次、多次调用。
-2. filename 必须和工具返回的文件名完全一致（如 1706.03762v1.pdf）。
-   不确定文件名或节标题时，先调用工具，让报错信息告诉你可选值，不要编造。
-3. 它只给译文，不给结论。用户既要译文又要总结时，先用它拿到译文，再基于译文作答。
-4. 返回内容里的「【节标题】第 N 页」要保留。
-5. 用户只想翻其中一两句时，直接用那几句原文给出中文即可，不要为此调用本工具。
-
-【回答规则】
-1. 每一条结论都要有 local_search 返回的原文支撑。原文里没有的数字、结论、页码，一律不写。
-2. 本地查不到相关内容时，直接回答「库中没有相关资料」，不要猜、不要用通用知识作答。
-   工具返回的内容里出现「参考资料未提及」，也按这一条处理。
-   只回这一句，不要列举检索关键词、调用了几次、换了哪些说法。
-3. 回答最后另起一行写来源，格式是：
-   检索文件来源以及页码：1706.03762v1.pdf 第1页、第8页
-   页码只能取自工具返回的页码，并且只写真正支撑你结论的那几页：
-   工具给了 6 页而你只用了 1 页，就只写那 1 页。不要自己推算或补页码。
-   没有引用任何原文时（包括拒答），这些来源行整行不写，不要写「无」。
-4. 用中文，简洁专业。不要「我认为」「一般来说」「可能是」这类推测表述。
-5. 一次只调用一个工具，不要并行发起多个工具调用。
-6. 不允许从文件名、编号推断事实。文件名里的「1706.03762」是 arXiv 编号，
-   不能据此推断论文的发表时间，也不能把编号里的数字当成论文内容。
-7. 不要做推断。原文没有用一句话直接说明的事实，就回答「库中没有明确说明」，
-   不要用常识补全，也不要从参考文献条目的年份推断本文的信息。
-8. 同一轮最多调用 local_search 6 次，超出会被工具直接拒绝——这是硬约束，不是建议。
-   要覆盖多篇文献时，把每次查询写得具体
-   （例如「CLIP 的训练目标是什么」），一次问清，不要换着关键词反复试同一篇。
-   6 次还没凑齐，就用已查到的内容作答，并说明哪几篇没有查到。
-9. 不要解释你自己的检索过程。你看不到检索日志，说不出调了几次工具、换了哪些关键词。
-   用户问你刚才为什么没答上来，就说「上一轮没有完成」，不要编造原因。
-"""
 model=ChatOpenAI(
     model="qwen3.8-flash",
     base_url=os.getenv("qwen_url"),
@@ -93,20 +43,6 @@ agent=create_agent(
     model
 )
 
-# 联网时才追加的规则。必须显式覆盖前面「查不到就说库中没有相关资料」那条，
-# 否则开关打开了，模型也只会继续回答"库中没有"，联网等于没开。
-WEB_RULES = """
-【本次已开启联网（多了一个 web_search 工具）】
-1. 依然优先用 local_search。只有本地确实查不到时，才调用 web_search。
-2. 用联网内容作答时，结论后面标「（来自互联网）」，并在最后一行加：
-   联网来源：<链接>
-3. 不能把联网内容说成本地文献里的内容，两边出处必须分开写。
-4. 本地与联网冲突时，以本地文献为准，并说明存在冲突。
-5. 前面「本地查不到就回答库中没有相关资料」那条，本次改成：先转 web_search，
-   联网也没有结果时，再回答本地和网上都没有，用一句话说完，
-   不要列举检索关键词、调用次数或检索过程。
-"""
-
 # 一个智能体，两套提示词。联网的值从本次调用传进来（app.py 里 invoke 的 context 参数），
 # 所以同一个 agent 对象能同时服务联网和不联网两种会话，不用建两个。
 from langchain.agents.middleware import dynamic_prompt, ToolCallLimitMiddleware
@@ -121,8 +57,10 @@ def pick_prompt(request) -> str:
     if request.runtime.context:
         use_web = request.runtime.context.get("use_web", False)
     if use_web:
-        return system_prompt + WEB_RULES
-    return system_prompt
+        # 联网规则必须显式覆盖「查不到就说库中没有相关资料」那条，否则开关打开了，
+        # 模型也只会继续回答"库中没有"，联网等于没开。
+        return main_prompt + web_prompt
+    return main_prompt
 
 # 检索次数的硬上限，分两层，各管一件事：
 #
@@ -134,16 +72,26 @@ def pick_prompt(request) -> str:
 #
 # 2) 工具内部的 over_budget 管「查不了」。它按本地+联网合计计数，
 #    是真正不让检索发生的那一道，中间件只是让过程早点结束。
-limit_search = ToolCallLimitMiddleware(
+#
+#    两个检索工具都得挂。只挂 local_search 的时候，联网那条路是敞开的：模型被
+#    over_budget 拒了之后会把拒绝当成临时故障，换个关键词再试，而这条路上没有
+#    任何东西能结束这一轮——实测一轮点了 16 次、跑 118 秒，其中约十次是白等。
+#    合计上限仍由 over_budget 把关（6 次），这里只管「到数就别再磨了」。
+limit_local = ToolCallLimitMiddleware(
     tool_name="local_search",
     run_limit=MAX_RETRIEVAL,      # 按「一轮」算，不是按会话
+    exit_behavior="end",
+)
+limit_web = ToolCallLimitMiddleware(
+    tool_name="web_search",
+    run_limit=MAX_RETRIEVAL,
     exit_behavior="end",
 )
 
 main_agent=create_agent(
     model,
     tools=[local_search,translate_paper,web_search,list_documents],
-    middleware=[pick_prompt, limit_search],
+    middleware=[pick_prompt, limit_local, limit_web],
     checkpointer=checkpoint,
 )
 if __name__=="__main__":

@@ -11,6 +11,10 @@ MAX_RETRIEVAL = 6
 # 哪些工具算「一次检索」。web_search 也占额度，否则联网开着时它照样能一直试。
 SEARCH_TOOL_NAMES = ("local_search", "web_search")
 
+# 拒绝文本的开头。工具返回它、以及页面要把它和「真的检索了」区分开，都靠这个前缀，
+# 所以只在这里写一次。
+REFUSAL_PREFIX = "本轮检索次数已达上限"
+
 
 def used_retrieval(runtime):
     """本轮已经完成的检索次数：从消息历史往前数到最近一条用户提问为止。
@@ -36,5 +40,18 @@ def over_budget(runtime):
     """到上限就返回一句打发模型的话，没到返回 None。"""
     if used_retrieval(runtime) < MAX_RETRIEVAL:
         return None
-    return ("本轮检索次数已达上限（%d 次），不能再调用检索工具。"
+    return (REFUSAL_PREFIX + "（%d 次），不能再调用检索工具。"
             "请直接用已经查到的内容作答；查不到的部分就说明没查到，不要换关键词再试。" % MAX_RETRIEVAL)
+
+
+def is_refusal(text):
+    """这条工具返回是不是「拒绝」，而不是一次真的检索结果。
+
+    页面上那个「共检索 N 次」原来数的是模型点了几次工具，被拒的尝试也算进去，
+    于是显示 16 次、实际只查了 6 次。要分开数就得认得出拒绝文本，而拒绝有两个来源：
+    本文件的 over_budget，和 ToolCallLimitMiddleware 的英文提示。
+    """
+    text = text or ""
+    if text.startswith(REFUSAL_PREFIX):
+        return True
+    return "tool call limit" in text.lower()
